@@ -1,0 +1,34 @@
+{
+  "model": {
+    "architecture": "CNNAttentionImproved",
+    "n_ch": 12,
+    "window_size": 400,
+    "n_joints": 22,
+    "hidden": 256,
+    "n_attn": 5,
+    "n_heads": 4,
+    "dropout": 0.1,
+    "parameters": 3018522
+  },
+  "training": {
+    "batch_size": 256,
+    "epochs": 150,
+    "lr": 0.0001,
+    "weight_decay": 0.0001,
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingLR",
+    "grad_clip": 1.0,
+    "seed": 42
+  },
+  "data": {
+    "train_samples": 264839,
+    "test_samples": 132331,
+    "emg_shape": [
+      264839,
+      12,
+      400
+    ],
+    "normalization": "min-max [-1, 1]"
+  },
+  "device": "cuda"
+}
