@@ -191,11 +191,7 @@ def process_ninapro_file(mat_file_path, output_dir, subject_id, exercise_id):
     rep_flat = repetition.flatten()
 
     train_reps = [1, 3, 4, 6]
-    test_reps = [2, 5]
-
-    # Create masks
-    mask_train = np.isin(rep_flat, train_reps)
-    mask_test = np.isin(rep_flat, test_reps)
+    val_reps = [2, 5]
 
     # Filter Data FIRST, then window?
     # If we mask first, we lose continuity at boundaries.
@@ -214,7 +210,7 @@ def process_ninapro_file(mat_file_path, output_dir, subject_id, exercise_id):
     w_rep_flat = w_rep.flatten()
 
     w_mask_train = np.isin(w_rep_flat, train_reps)
-    w_mask_test = np.isin(w_rep_flat, test_reps)
+    w_mask_val = np.isin(w_rep_flat, val_reps)
 
     # Save Train
     if np.any(w_mask_train):
@@ -234,22 +230,22 @@ def process_ninapro_file(mat_file_path, output_dir, subject_id, exercise_id):
             f"  Saved Train (Reps {train_reps}) to {out_train}: {w_emg[w_mask_train].shape}"
         )
 
-    # Save Test
-    if np.any(w_mask_test):
-        out_test = os.path.join(
-            output_dir, f"{subject_id}_task-exercise{exercise_id}_test.npz"
+    # Save Val
+    if np.any(w_mask_val):
+        out_val = os.path.join(
+            output_dir, f"{subject_id}_task-exercise{exercise_id}_val.npz"
         )
         np.savez_compressed(
-            out_test,
-            emg=w_emg[w_mask_test],
-            angles=w_ang[w_mask_test],
+            out_val,
+            emg=w_emg[w_mask_val],
+            angles=w_ang[w_mask_val],
             fs=fs_emg,
-            stimulus=w_sti[w_mask_test],
-            repetition=w_rep[w_mask_test],
+            stimulus=w_sti[w_mask_val],
+            repetition=w_rep[w_mask_val],
             exercise=exercise_id,
         )
         print(
-            f"  Saved Test  (Reps {test_reps}) to {out_test}: {w_emg[w_mask_test].shape}"
+            f"  Saved Val   (Reps {val_reps}) to {out_val}: {w_emg[w_mask_val].shape}"
         )
 
 

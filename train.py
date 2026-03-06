@@ -4,6 +4,8 @@ Training loop for temporal-window CNNAttentionImproved.
 """
 
 import json
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 import matplotlib
@@ -25,10 +27,10 @@ PROCESSED_DIR = "processed data"
 OUTPUT_DIR = "outputs"
 BATCH_SIZE = 256
 EPOCHS = 150
-LR = 3e-4
+LR = 6e-4
 ETA_MIN = 3e-5
 WARMUP_EPOCHS = 5
-WEIGHT_DECAY = 1e-4
+WEIGHT_DECAY = 3e-4
 N_WORKERS = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -38,10 +40,12 @@ INPUT_MODE = "raw"  # "raw" | "rms_subframes"
 RMS_SUBFRAMES = 25
 INPUT_SCALER = "standard"  # "none" | "standard"
 TARGET_SCALER = "standard"  # "none" | "standard" | "minmax"
-TRAIN_TARGET_LAG = 0
+TRAIN_TARGET_LAG = 1
 ENABLE_LAG_SWEEP = True
 LAG_SWEEP_MAX = 30
-CHECKPOINT_SELECTION = "lag_r2"  # "r2" | "lag_r2"
+CHECKPOINT_SELECTION = "r2"  # "r2" | "lag_r2"
+DROPOUT = 0.15
+NPZ_LOAD_WORKERS = 8
 
 
 # ── DATASET (Multi-File Loader) ──────────────────────────────
@@ -51,11 +55,21 @@ class NpzDataset(Dataset):
         files = sorted(root.glob(f"*_{split}.npz"))
         assert len(files) > 0, f"No *_{split}.npz files found in {root}"
 
-        emg_parts, angle_parts = [], []
-        for f in files:
-            data = np.load(f)
-            emg_parts.append(data["emg"].astype(np.float32))
-            angle_parts.append(data["angles"].astype(np.float32))
+        def _load_npz_pair(file_path):
+            with np.load(file_path, allow_pickle=False) as data:
+                emg = np.asarray(data["emg"], dtype=np.float32)
+                angles = np.asarray(data["angles"], dtype=np.float32)
+            return emg, angles
+
+        workers = max(1, min(int(NPZ_LOAD_WORKERS), len(files)))
+        if workers > 1:
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                loaded_parts = list(pool.map(_load_npz_pair, files))
+        else:
+            loaded_parts = [_load_npz_pair(f) for f in files]
+
+        emg_parts = [part[0] for part in loaded_parts]
+        angle_parts = [part[1] for part in loaded_parts]
 
         self.X = np.concatenate(emg_parts, axis=0)
         self.y = np.concatenate(angle_parts, axis=0)
@@ -89,7 +103,7 @@ def _apply_emg_transform(emg_3d, mode):
     if mode == "none":
         return arr
     if mode == "log1p":
-        return np.log1p(np.maximum(arr, 0.0)).astype(np.float32)
+        return np.log1p(np.abs(arr)).astype(np.float32)
     raise ValueError(f"Unknown EMG_TRANSFORM: {mode}")
 
 
@@ -363,12 +377,20 @@ def evaluate(model, loader, criterion, device, inv_target_fn=None, return_arrays
     cc, rmse, r2 = compute_metrics(metric_preds, metric_targets)
 
     if return_arrays:
-        return total_loss / len(loader.dataset), cc, rmse, r2, metric_preds, metric_targets
+        return (
+            total_loss / len(loader.dataset),
+            cc,
+            rmse,
+            r2,
+            metric_preds,
+            metric_targets,
+        )
     return total_loss / len(loader.dataset), cc, rmse, r2
 
 
 # ── MAIN ─────────────────────────────────────────────────────
 def main():
+    startup_t0 = time.perf_counter()
     emg_transform = EMG_TRANSFORM
     input_mode = INPUT_MODE
     rms_subframes = RMS_SUBFRAMES
@@ -392,27 +414,26 @@ def main():
     print("=" * 60)
 
     train_ds = NpzDataset("train")
-    test_ds = NpzDataset("test")
+    val_ds = NpzDataset("val")
+    print(f"Startup | dataset load: {time.perf_counter() - startup_t0:.1f}s")
 
     train_ds.X = _normalize_emg_shape(train_ds.X)
-    test_ds.X = _normalize_emg_shape(test_ds.X)
+    val_ds.X = _normalize_emg_shape(val_ds.X)
 
     train_ds.y = np.asarray(train_ds.y, dtype=np.float32)
-    test_ds.y = np.asarray(test_ds.y, dtype=np.float32)
+    val_ds.y = np.asarray(val_ds.y, dtype=np.float32)
 
     train_ds.X, train_ds.y, dropped_train = _mask_finite(train_ds.X, train_ds.y)
-    test_ds.X, test_ds.y, dropped_test = _mask_finite(test_ds.X, test_ds.y)
-    if dropped_train > 0 or dropped_test > 0:
-        print(
-            f"Dropped non-finite samples | train={dropped_train}, test={dropped_test}"
-        )
+    val_ds.X, val_ds.y, dropped_val = _mask_finite(val_ds.X, val_ds.y)
+    if dropped_train > 0 or dropped_val > 0:
+        print(f"Dropped non-finite samples | train={dropped_train}, val={dropped_val}")
 
     if TRAIN_TARGET_LAG != 0:
-        train_ds.X, train_ds.y = _apply_target_lag(train_ds.X, train_ds.y, TRAIN_TARGET_LAG)
-        test_ds.X, test_ds.y = _apply_target_lag(test_ds.X, test_ds.y, TRAIN_TARGET_LAG)
-        print(
-            f"Applied target lag shift: TRAIN_TARGET_LAG={TRAIN_TARGET_LAG} samples"
+        train_ds.X, train_ds.y = _apply_target_lag(
+            train_ds.X, train_ds.y, TRAIN_TARGET_LAG
         )
+        val_ds.X, val_ds.y = _apply_target_lag(val_ds.X, val_ds.y, TRAIN_TARGET_LAG)
+        print(f"Applied target lag shift: TRAIN_TARGET_LAG={TRAIN_TARGET_LAG} samples")
 
     if train_ds.X.ndim != 3 or train_ds.X.shape[1] != 12:
         raise RuntimeError(
@@ -427,31 +448,32 @@ def main():
         )
 
     if (
-        test_ds.X.ndim != 3
-        or test_ds.X.shape[1] != 12
-        or test_ds.X.shape[2] != train_ds.X.shape[2]
+        val_ds.X.ndim != 3
+        or val_ds.X.shape[1] != 12
+        or val_ds.X.shape[2] != train_ds.X.shape[2]
     ):
         raise RuntimeError(
-            "Train/test EMG shapes are inconsistent. Re-run data_processing.py to regenerate both splits."
+            "Train/val EMG shapes are inconsistent. Re-run preprocessing.py to regenerate both splits."
         )
 
     train_ds.X = _apply_emg_transform(train_ds.X, emg_transform)
-    test_ds.X = _apply_emg_transform(test_ds.X, emg_transform)
+    val_ds.X = _apply_emg_transform(val_ds.X, emg_transform)
 
     if input_mode == "rms_subframes":
         train_ds.X = _rms_subframe_sequence(train_ds.X, rms_subframes)
-        test_ds.X = _rms_subframe_sequence(test_ds.X, rms_subframes)
+        val_ds.X = _rms_subframe_sequence(val_ds.X, rms_subframes)
         print(f"Converted EMG to RMS subframes: T={train_ds.X.shape[2]}")
     elif input_mode != "raw":
         raise ValueError(f"Unknown INPUT_MODE: {input_mode}")
 
     x_scale_params = _fit_input_scaler(train_ds.X, input_scaler)
     train_ds.X = _apply_input_scaler(train_ds.X, x_scale_params)
-    test_ds.X = _apply_input_scaler(test_ds.X, x_scale_params)
+    val_ds.X = _apply_input_scaler(val_ds.X, x_scale_params)
 
     y_scale_params = _fit_target_scaler(train_ds.y, target_scaler)
     train_ds.y = _apply_target_scaler(train_ds.y, y_scale_params)
-    test_ds.y = _apply_target_scaler(test_ds.y, y_scale_params)
+    val_ds.y = _apply_target_scaler(val_ds.y, y_scale_params)
+    print(f"Startup | preprocessing: {time.perf_counter() - startup_t0:.1f}s")
 
     def _inv_target(arr):
         return _inverse_target_scaler(arr, y_scale_params)
@@ -466,8 +488,8 @@ def main():
         pin_memory=True,
     )
 
-    test_loader = DataLoader(
-        test_ds,
+    val_loader = DataLoader(
+        val_ds,
         batch_size=BATCH_SIZE,
         shuffle=False,
         num_workers=N_WORKERS,
@@ -475,7 +497,11 @@ def main():
     )
 
     n_joints = int(train_ds.y.shape[1])
-    model = CNNAttentionImproved(window_size=window_size, n_joints=n_joints).to(DEVICE)
+    model = CNNAttentionImproved(
+        window_size=window_size,
+        n_joints=n_joints,
+        dropout=DROPOUT,
+    ).to(DEVICE)
     optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
     scheduler = CosineAnnealingLR(
         optimizer,
@@ -485,6 +511,7 @@ def main():
     criterion = nn.SmoothL1Loss(beta=0.5)
 
     print(f"Parameters: {model.count_params():,}\n")
+    print(f"Startup | ready to train: {time.perf_counter() - startup_t0:.1f}s")
 
     # ── Save config ──────────────────────────────────────────
     config = {
@@ -503,6 +530,7 @@ def main():
             "eta_min": ETA_MIN,
             "warmup_epochs": WARMUP_EPOCHS,
             "weight_decay": WEIGHT_DECAY,
+            "dropout": DROPOUT,
             "optimizer": "AdamW",
             "scheduler": "CosineAnnealingLR",
             "loss": "SmoothL1Loss(beta=0.5)",
@@ -511,7 +539,7 @@ def main():
         },
         "data": {
             "train_samples": len(train_ds),
-            "test_samples": len(test_ds),
+            "val_samples": len(val_ds),
             "emg_shape": list(train_ds.X.shape),
             "paper_replication": PAPER_REPLICATION,
             "emg_transform": emg_transform,
@@ -561,7 +589,7 @@ def main():
         )
         val_loss, cc, rmse, r2, val_preds, val_targets = evaluate(
             model,
-            test_loader,
+            val_loader,
             criterion,
             DEVICE,
             inv_target_fn=_inv_target,
