@@ -110,7 +110,7 @@ class PositionalEncoding(nn.Module):
 
 
 class KinematicCouplingHead(nn.Module):
-    def __init__(self, in_dim=128, n_joints=10):
+    def __init__(self, in_dim=128, n_joints=22):
         super().__init__()
         self.fc = nn.Linear(in_dim, n_joints)
         self.coupling = nn.Parameter(torch.eye(n_joints) * 0.1)
@@ -124,8 +124,8 @@ class CNNAttentionImproved(nn.Module):
     def __init__(
         self,
         n_ch=12,
-        window_size=50,
-        n_joints=10,
+        window_size=400,
+        n_joints=22,
         hidden=192,
         n_attn=3,
         n_heads=3,

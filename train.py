@@ -16,7 +16,7 @@ import torch.nn as nn
 from model import CNNAttentionImproved
 from scipy.stats import pearsonr
 from torch.optim import AdamW
-from torch.optim.lr_scheduler import CosineAnnealingWarmRestarts
+from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -26,9 +26,9 @@ OUTPUT_DIR = "outputs"
 BATCH_SIZE = 256
 EPOCHS = 150
 LR = 3e-4
-ETA_MIN = 1e-5
-WARMUP_EPOCHS = 10
-WEIGHT_DECAY = 5e-4
+ETA_MIN = 3e-5
+WARMUP_EPOCHS = 5
+WEIGHT_DECAY = 1e-4
 N_WORKERS = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -38,6 +38,10 @@ INPUT_MODE = "raw"  # "raw" | "rms_subframes"
 RMS_SUBFRAMES = 25
 INPUT_SCALER = "standard"  # "none" | "standard"
 TARGET_SCALER = "standard"  # "none" | "standard" | "minmax"
+TRAIN_TARGET_LAG = 0
+ENABLE_LAG_SWEEP = True
+LAG_SWEEP_MAX = 30
+CHECKPOINT_SELECTION = "lag_r2"  # "r2" | "lag_r2"
 
 
 # ── DATASET (Multi-File Loader) ──────────────────────────────
@@ -104,6 +108,22 @@ def _normalize_emg_shape(emg):
 def _mask_finite(emg, angles):
     mask = np.isfinite(angles).all(axis=1) & np.isfinite(emg).all(axis=(1, 2))
     return emg[mask], angles[mask], int(mask.size - np.count_nonzero(mask))
+
+
+def _apply_target_lag(emg, angles, lag):
+    lag = int(lag)
+    if lag == 0:
+        return emg, angles
+
+    n = min(len(emg), len(angles))
+    if n <= abs(lag):
+        raise ValueError(
+            f"TRAIN_TARGET_LAG={lag} is too large for sequence length {n}."
+        )
+
+    if lag > 0:
+        return emg[:-lag], angles[lag:]
+    return emg[-lag:], angles[:lag]
 
 
 def _rms_subframe_sequence(emg_3d, n_subframes):
@@ -202,6 +222,45 @@ def _inverse_target_scaler(y, params):
     raise ValueError(f"Unknown target scale mode: {mode}")
 
 
+def _align_by_lag(preds, targets, lag):
+    lag = int(lag)
+    if lag == 0:
+        return preds, targets
+    if lag > 0:
+        if preds.shape[0] <= lag:
+            return None, None
+        return preds[:-lag], targets[lag:]
+    if preds.shape[0] <= -lag:
+        return None, None
+    return preds[-lag:], targets[:lag]
+
+
+def sweep_lag_metrics(preds, targets, max_abs_lag):
+    max_abs_lag = int(max(0, max_abs_lag))
+    records = []
+
+    for lag in range(-max_abs_lag, max_abs_lag + 1):
+        aligned_preds, aligned_targets = _align_by_lag(preds, targets, lag)
+        if aligned_preds is None or aligned_preds.shape[0] < 4:
+            continue
+        cc, rmse, r2 = compute_metrics(aligned_preds, aligned_targets)
+        records.append(
+            {
+                "lag": int(lag),
+                "n": int(aligned_preds.shape[0]),
+                "cc": float(cc),
+                "rmse": float(rmse),
+                "r2": float(r2),
+            }
+        )
+
+    if len(records) == 0:
+        return None, []
+
+    best = max(records, key=lambda row: (row["r2"], -row["rmse"]))
+    return best, records
+
+
 def _warmup_lr(optimizer, epoch_idx, base_lr, warmup_epochs=5):
     if warmup_epochs <= 0:
         return
@@ -279,7 +338,7 @@ def train_one_epoch(model, loader, optimizer, criterion, device, inv_target_fn=N
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, inv_target_fn=None):
+def evaluate(model, loader, criterion, device, inv_target_fn=None, return_arrays=False):
     model.eval()
     total_loss = 0.0
     all_preds, all_targets = [], []
@@ -303,6 +362,8 @@ def evaluate(model, loader, criterion, device, inv_target_fn=None):
 
     cc, rmse, r2 = compute_metrics(metric_preds, metric_targets)
 
+    if return_arrays:
+        return total_loss / len(loader.dataset), cc, rmse, r2, metric_preds, metric_targets
     return total_loss / len(loader.dataset), cc, rmse, r2
 
 
@@ -344,6 +405,13 @@ def main():
     if dropped_train > 0 or dropped_test > 0:
         print(
             f"Dropped non-finite samples | train={dropped_train}, test={dropped_test}"
+        )
+
+    if TRAIN_TARGET_LAG != 0:
+        train_ds.X, train_ds.y = _apply_target_lag(train_ds.X, train_ds.y, TRAIN_TARGET_LAG)
+        test_ds.X, test_ds.y = _apply_target_lag(test_ds.X, test_ds.y, TRAIN_TARGET_LAG)
+        print(
+            f"Applied target lag shift: TRAIN_TARGET_LAG={TRAIN_TARGET_LAG} samples"
         )
 
     if train_ds.X.ndim != 3 or train_ds.X.shape[1] != 12:
@@ -409,13 +477,12 @@ def main():
     n_joints = int(train_ds.y.shape[1])
     model = CNNAttentionImproved(window_size=window_size, n_joints=n_joints).to(DEVICE)
     optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
-    scheduler = CosineAnnealingWarmRestarts(
+    scheduler = CosineAnnealingLR(
         optimizer,
-        T_0=15,
-        T_mult=2,
+        T_max=EPOCHS - WARMUP_EPOCHS,
         eta_min=ETA_MIN,
     )
-    criterion = nn.MSELoss()
+    criterion = nn.SmoothL1Loss(beta=0.5)
 
     print(f"Parameters: {model.count_params():,}\n")
 
@@ -437,10 +504,8 @@ def main():
             "warmup_epochs": WARMUP_EPOCHS,
             "weight_decay": WEIGHT_DECAY,
             "optimizer": "AdamW",
-            "scheduler": "CosineAnnealingWarmRestarts",
-            "scheduler_t0": 15,
-            "scheduler_tmult": 2,
-            "loss": "MSELoss()",
+            "scheduler": "CosineAnnealingLR",
+            "loss": "SmoothL1Loss(beta=0.5)",
             "grad_clip": 1.0,
             "seed": SEED,
         },
@@ -454,6 +519,10 @@ def main():
             "rms_subframes": rms_subframes,
             "input_scaler": input_scaler,
             "target_scaler": target_scaler,
+            "train_target_lag": TRAIN_TARGET_LAG,
+            "enable_lag_sweep": ENABLE_LAG_SWEEP,
+            "lag_sweep_max": LAG_SWEEP_MAX,
+            "checkpoint_selection": CHECKPOINT_SELECTION,
         },
         "device": DEVICE,
     }
@@ -468,8 +537,15 @@ def main():
         "val_cc": [],
         "val_rmse": [],
         "val_r2": [],
+        "val_lag_best": [],
+        "val_lag_cc": [],
+        "val_lag_rmse": [],
+        "val_lag_r2": [],
         "best_r2": None,
     }
+
+    lag_sweep_last = []
+    best_score = float("-inf")
 
     epoch_bar = tqdm(range(1, EPOCHS + 1), desc="Training")
     for epoch in epoch_bar:
@@ -483,12 +559,25 @@ def main():
             DEVICE,
             inv_target_fn=_inv_target,
         )
-        val_loss, cc, rmse, r2 = evaluate(
-            model, test_loader, criterion, DEVICE, inv_target_fn=_inv_target
+        val_loss, cc, rmse, r2, val_preds, val_targets = evaluate(
+            model,
+            test_loader,
+            criterion,
+            DEVICE,
+            inv_target_fn=_inv_target,
+            return_arrays=True,
         )
 
+        lag_best = {"lag": 0, "cc": float(cc), "rmse": float(rmse), "r2": float(r2)}
+        if ENABLE_LAG_SWEEP and LAG_SWEEP_MAX > 0:
+            lag_best_candidate, lag_sweep_last = sweep_lag_metrics(
+                val_preds, val_targets, LAG_SWEEP_MAX
+            )
+            if lag_best_candidate is not None:
+                lag_best = lag_best_candidate
+
         if epoch > WARMUP_EPOCHS:
-            scheduler.step(epoch - WARMUP_EPOCHS)
+            scheduler.step()
 
         current_lr = float(optimizer.param_groups[0]["lr"])
         epoch_bar.set_postfix(
@@ -501,7 +590,8 @@ def main():
             f"Train R² {train_r2:.4f} | "
             f"Val {val_loss:.4f} | "
             f"CC {cc:.4f} | "
-            f"R² {r2:.4f}"
+            f"R² {r2:.4f} | "
+            f"Lag* {lag_best['lag']:+d} (R² {lag_best['r2']:.4f}, RMSE {lag_best['rmse']:.4f})"
         )
 
         history["train_loss"].append(float(train_loss))
@@ -510,8 +600,16 @@ def main():
         history["val_cc"].append(float(cc))
         history["val_rmse"].append(float(rmse))
         history["val_r2"].append(float(r2))
+        history["val_lag_best"].append(int(lag_best["lag"]))
+        history["val_lag_cc"].append(float(lag_best["cc"]))
+        history["val_lag_rmse"].append(float(lag_best["rmse"]))
+        history["val_lag_r2"].append(float(lag_best["r2"]))
 
-        if r2 > best_r2:
+        score = float(r2)
+        if CHECKPOINT_SELECTION == "lag_r2":
+            score = float(lag_best["r2"])
+        if score > best_score:
+            best_score = score
             best_r2 = r2
             torch.save(model.state_dict(), out_dir / "best_model.pt")
             scaler_artifacts = {}
@@ -533,6 +631,10 @@ def main():
 
         if epoch % 10 == 0 or epoch == EPOCHS:
             plot_curves(history, out_dir)
+
+    if ENABLE_LAG_SWEEP and len(lag_sweep_last) > 0:
+        with open(out_dir / "lag_sweep_last_epoch.json", "w") as f:
+            json.dump(lag_sweep_last, f, indent=2)
 
     print("\nBest R²:", best_r2)
 
