@@ -27,10 +27,10 @@ PROCESSED_DIR = "processed data"
 OUTPUT_DIR = "outputs"
 BATCH_SIZE = 256
 EPOCHS = 150
-LR = 6e-4
-ETA_MIN = 3e-5
-WARMUP_EPOCHS = 5
-WEIGHT_DECAY = 3e-4
+LR = 4e-4
+ETA_MIN = 1e-5
+WARMUP_EPOCHS = 8
+WEIGHT_DECAY = 6e-4
 N_WORKERS = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
@@ -41,10 +41,10 @@ RMS_SUBFRAMES = 25
 INPUT_SCALER = "standard"  # "none" | "standard"
 TARGET_SCALER = "standard"  # "none" | "standard" | "minmax"
 TRAIN_TARGET_LAG = 1
-ENABLE_LAG_SWEEP = True
+ENABLE_LAG_SWEEP = False
 LAG_SWEEP_MAX = 30
 CHECKPOINT_SELECTION = "r2"  # "r2" | "lag_r2"
-DROPOUT = 0.15
+DROPOUT = 0.20
 NPZ_LOAD_WORKERS = 8
 
 
@@ -521,6 +521,8 @@ def main():
             "window_size": window_size,
             "n_joints": n_joints,
             "hidden": int(getattr(model, "hidden", -1)),
+            "n_attn": int(getattr(model, "n_attn", -1)),
+            "n_heads": int(getattr(model, "n_heads", -1)),
             "parameters": model.count_params(),
         },
         "training": {

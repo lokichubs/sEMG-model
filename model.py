@@ -126,9 +126,9 @@ class CNNAttentionImproved(nn.Module):
         n_ch=12,
         window_size=400,
         n_joints=22,
-        hidden=192,
-        n_attn=4,
-        n_heads=3,
+        hidden=256,
+        n_attn=5,
+        n_heads=4,
         dropout=0.1,
     ):
         super().__init__()
@@ -140,6 +140,8 @@ class CNNAttentionImproved(nn.Module):
         self.n_ch = n_ch
         self.window_size = window_size
         self.hidden = hidden
+        self.n_attn = n_attn
+        self.n_heads = n_heads
 
         self.circ = CircularElectrodeConv(out_ch=16, elec_k=3, time_k=5)
         self.pre = nn.Sequential(
