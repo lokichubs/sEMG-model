@@ -127,7 +127,7 @@ class CNNAttentionImproved(nn.Module):
         window_size=400,
         n_joints=22,
         hidden=256,
-        n_attn=5,
+        n_attn=4,
         n_heads=4,
         dropout=0.1,
     ):
