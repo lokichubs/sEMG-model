@@ -1,12 +1,12 @@
 """
 sleeve_geomety_model.py
-Geometry-aware sleeve model with a cylindrical front-end.
+Geometry-aware sleeve model with a ring-structured front-end.
 
 Design goals:
-  1) preserve the existing temporal backbone idea (temporal convs + attention)
-  2) remap flat sleeve channels into a ring/slot cylinder representation
-  3) use circular processing around the forearm and standard processing along it
-  4) add simple rotation robustness via mean pooling over all circular shifts
+    1) preserve the same temporal backbone as sleeve_model.py
+    2) remap flat sleeve channels into a ring/slot representation
+    3) apply circular processing only within each ring
+    4) avoid extra cylindrical mixing across rings
 
 """
 
@@ -91,38 +91,32 @@ class ChannelToCylinder(nn.Module):
 
         grid = x.new_zeros((bsz, self.n_rings, self.n_slots, timesteps))
         grid[:, self.valid_rings, self.valid_slots, :] = x[:, self.valid_channels, :]
-        return grid.unsqueeze(1)
+        return grid
 
 
-class CylindricalConvBlock(nn.Module):
-    def __init__(self, in_ch, out_ch, ring_k=3, slot_k=3, time_k=7):
+class RingCircularConv(nn.Module):
+    def __init__(self, out_ch=16, slot_k=3, time_k=5):
         super().__init__()
-        self.ring_pad = ring_k // 2
         self.slot_pad = slot_k // 2
-        self.time_pad = time_k // 2
-        self.conv = nn.Conv3d(
-            in_ch,
-            out_ch,
-            kernel_size=(ring_k, slot_k, time_k),
-            padding=0,
+        self.conv = nn.Conv2d(
+            in_channels=1,
+            out_channels=out_ch,
+            kernel_size=(slot_k, time_k),
+            padding=(0, time_k // 2),
             bias=False,
         )
-        self.bn = nn.BatchNorm3d(out_ch)
-        self.act = nn.ReLU()
 
     def forward(self, x):
+        if x.ndim != 4:
+            raise RuntimeError(
+                f"Expected ring input shape (B*R, 1, S, T), got {x.shape}"
+            )
         if self.slot_pad > 0:
-            x = F.pad(x, (0, 0, self.slot_pad, self.slot_pad, 0, 0), mode="circular")
-        if self.ring_pad > 0 or self.time_pad > 0:
-            x = F.pad(
-                x,
-                (self.time_pad, self.time_pad, 0, 0, self.ring_pad, self.ring_pad),
-                mode="constant",
-                value=0.0,
+            x = torch.cat(
+                [x[:, :, -self.slot_pad :, :], x, x[:, :, : self.slot_pad, :]], dim=2
             )
         x = self.conv(x)
-        x = self.bn(x)
-        return self.act(x)
+        return F.relu(x)
 
 
 class MultiScaleConv1D(nn.Module):
@@ -241,17 +235,23 @@ class SleeveGeometryAttentionModel(nn.Module):
 
         self.mapper = ChannelToCylinder()
         self.register_buffer(
-            "cylinder_mask",
-            self.mapper.valid_mask.unsqueeze(0).unsqueeze(0).unsqueeze(-1),
+            "ring_mask",
+            self.mapper.valid_mask.unsqueeze(0).unsqueeze(1).unsqueeze(-1),
         )
 
-        self.cyl_block1 = CylindricalConvBlock(1, geom_ch, ring_k=3, slot_k=3, time_k=7)
-        self.cyl_block2 = CylindricalConvBlock(
-            geom_ch, geom_ch, ring_k=3, slot_k=3, time_k=5
+        self.ring_circ = RingCircularConv(
+            out_ch=geom_ch,
+            slot_k=3,
+            time_k=5,
         )
 
         self.pre = nn.Sequential(
-            nn.Conv1d(geom_ch * self.mapper.n_rings, hidden, kernel_size=1, bias=False),
+            nn.Conv1d(
+                geom_ch * self.mapper.n_rings * self.mapper.n_slots,
+                hidden,
+                kernel_size=1,
+                bias=False,
+            ),
             nn.BatchNorm1d(hidden),
             nn.ReLU(),
         )
@@ -281,24 +281,15 @@ class SleeveGeometryAttentionModel(nn.Module):
 
     def _geometry_frontend(self, x):
         x = self.mapper(x)
-        x = x * self.cylinder_mask
+        bsz, rings, slots, timesteps = x.shape
+        x = x * self.ring_mask.squeeze(1)
 
-        shifted_features = []
-        for shift in range(self.mapper.n_slots):
-            shifted = torch.roll(x, shifts=shift, dims=3)
-            feat = self.cyl_block1(shifted)
-            feat = self.cyl_block2(feat)
-            shifted_features.append(feat)
-
-        x = torch.stack(shifted_features, dim=0).mean(dim=0)
-
-        mask = self.cylinder_mask
-        x = x * mask
-        slot_den = mask.sum(dim=3).clamp_min(1.0)
-        x = x.sum(dim=3) / slot_den
-
-        bsz, channels, rings, timesteps = x.shape
-        x = x.reshape(bsz, channels * rings, timesteps)
+        x = x.reshape(bsz * rings, 1, slots, timesteps)
+        x = self.ring_circ(x)
+        x = x.reshape(bsz, rings, self.geom_ch, slots, timesteps)
+        x = x.permute(0, 2, 1, 3, 4).reshape(
+            bsz, self.geom_ch * rings * slots, timesteps
+        )
         return self.pre(x)
 
     def forward(self, x):

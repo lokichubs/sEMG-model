@@ -57,11 +57,25 @@ MODEL_REGISTRY = {
         "cls": SleeveCNNAttentionImproved,
         "architecture": "SleeveCNNAttentionImproved",
         "default_output_dir": OUTPUT_DIR,
+        "default_batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "eta_min": ETA_MIN,
+        "warmup_epochs": WARMUP_EPOCHS,
+        "weight_decay": WEIGHT_DECAY,
+        "dropout": DROPOUT,
     },
     "geometry": {
         "cls": SleeveGeometryAttentionModel,
         "architecture": "SleeveGeometryAttentionModel",
         "default_output_dir": f"{OUTPUT_DIR}_geometry",
+        "default_batch_size": 32,
+        "epochs": 80,
+        "lr": 1e-5,
+        "eta_min": 1e-6,
+        "warmup_epochs": 10,
+        "weight_decay": 5e-4,
+        "dropout": 0.10,
     },
 }
 
@@ -85,6 +99,12 @@ def parse_args():
             "Relative paths are resolved from the sEMG_sleeve folder."
         ),
     )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=None,
+        help="Optional batch size override. If omitted, uses a model-specific default.",
+    )
     return parser.parse_args()
 
 
@@ -96,6 +116,19 @@ def resolve_output_dir(cli_value, model_key):
     if not out_dir.is_absolute():
         out_dir = BASE_DIR / out_dir
     return out_dir
+
+
+def resolve_training_hparams(model_key, batch_size_override=None):
+    spec = MODEL_REGISTRY[model_key]
+    return {
+        "batch_size": int(batch_size_override or spec["default_batch_size"]),
+        "epochs": int(spec["epochs"]),
+        "lr": float(spec["lr"]),
+        "eta_min": float(spec["eta_min"]),
+        "warmup_epochs": int(spec["warmup_epochs"]),
+        "weight_decay": float(spec["weight_decay"]),
+        "dropout": float(spec["dropout"]),
+    }
 
 
 # ── DATASET (Multi-File Loader) ──────────────────────────────
@@ -444,6 +477,14 @@ def main():
     args = parse_args()
     model_key = args.model
     model_spec = MODEL_REGISTRY[model_key]
+    train_cfg = resolve_training_hparams(model_key, args.batch_size)
+    batch_size = train_cfg["batch_size"]
+    epochs = train_cfg["epochs"]
+    lr = train_cfg["lr"]
+    eta_min = train_cfg["eta_min"]
+    warmup_epochs = train_cfg["warmup_epochs"]
+    weight_decay = train_cfg["weight_decay"]
+    dropout = train_cfg["dropout"]
 
     emg_transform = EMG_TRANSFORM
     input_mode = INPUT_MODE
@@ -467,6 +508,8 @@ def main():
     print(f"Device: {DEVICE}")
     print(f"Model: {model_key} ({model_spec['architecture']})")
     print(f"Outputs: {out_dir}")
+    print(f"Batch size: {batch_size}")
+    print(f"LR: {lr:.2e} | Epochs: {epochs} | Warmup: {warmup_epochs}")
     print("=" * 60)
 
     train_ds = NpzDataset("train")
@@ -539,7 +582,7 @@ def main():
 
     train_loader = DataLoader(
         train_ds,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=True,
         num_workers=N_WORKERS,
         pin_memory=True,
@@ -547,7 +590,7 @@ def main():
 
     val_loader = DataLoader(
         val_ds,
-        batch_size=BATCH_SIZE,
+        batch_size=batch_size,
         shuffle=False,
         num_workers=N_WORKERS,
         pin_memory=True,
@@ -557,13 +600,13 @@ def main():
         window_size=window_size,
         n_ch=n_channels,
         n_joints=n_joints,
-        dropout=DROPOUT,
+        dropout=dropout,
     ).to(DEVICE)
-    optimizer = AdamW(model.parameters(), lr=LR, weight_decay=WEIGHT_DECAY)
+    optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(
         optimizer,
-        T_max=EPOCHS - WARMUP_EPOCHS,
-        eta_min=ETA_MIN,
+        T_max=max(1, epochs - warmup_epochs),
+        eta_min=eta_min,
     )
     criterion = nn.SmoothL1Loss(beta=0.5)
 
@@ -584,13 +627,13 @@ def main():
             "parameters": model.count_params(),
         },
         "training": {
-            "batch_size": BATCH_SIZE,
-            "epochs": EPOCHS,
-            "lr": LR,
-            "eta_min": ETA_MIN,
-            "warmup_epochs": WARMUP_EPOCHS,
-            "weight_decay": WEIGHT_DECAY,
-            "dropout": DROPOUT,
+            "batch_size": batch_size,
+            "epochs": epochs,
+            "lr": lr,
+            "eta_min": eta_min,
+            "warmup_epochs": warmup_epochs,
+            "weight_decay": weight_decay,
+            "dropout": dropout,
             "optimizer": "AdamW",
             "scheduler": "CosineAnnealingLR",
             "loss": "SmoothL1Loss(beta=0.5)",
@@ -636,9 +679,9 @@ def main():
     lag_sweep_last = []
     best_score = float("-inf")
 
-    epoch_bar = tqdm(range(1, EPOCHS + 1), desc="Training")
+    epoch_bar = tqdm(range(1, epochs + 1), desc="Training")
     for epoch in epoch_bar:
-        _warmup_lr(optimizer, epoch - 1, LR, WARMUP_EPOCHS)
+        _warmup_lr(optimizer, epoch - 1, lr, warmup_epochs)
 
         train_loss, train_r2 = train_one_epoch(
             model,
@@ -665,7 +708,7 @@ def main():
             if lag_best_candidate is not None:
                 lag_best = lag_best_candidate
 
-        if epoch > WARMUP_EPOCHS:
+        if epoch > warmup_epochs:
             scheduler.step()
 
         current_lr = float(optimizer.param_groups[0]["lr"])
@@ -718,7 +761,7 @@ def main():
         with open(out_dir / "history.json", "w") as f:
             json.dump(history, f, indent=2)
 
-        if epoch % 10 == 0 or epoch == EPOCHS:
+        if epoch % 10 == 0 or epoch == epochs:
             plot_curves(history, out_dir)
 
     if ENABLE_LAG_SWEEP and len(lag_sweep_last) > 0:

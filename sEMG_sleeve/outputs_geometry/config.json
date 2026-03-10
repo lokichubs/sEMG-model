@@ -1,0 +1,49 @@
+{
+  "model": {
+    "model_key": "geometry",
+    "architecture": "SleeveGeometryAttentionModel",
+    "n_ch": 128,
+    "window_size": 400,
+    "n_joints": 14,
+    "hidden": 256,
+    "n_attn": 4,
+    "n_heads": 4,
+    "geom_ch": 16,
+    "parameters": 4417090
+  },
+  "training": {
+    "batch_size": 32,
+    "epochs": 80,
+    "lr": 1e-05,
+    "eta_min": 1e-06,
+    "warmup_epochs": 10,
+    "weight_decay": 0.0005,
+    "dropout": 0.1,
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingLR",
+    "loss": "SmoothL1Loss(beta=0.5)",
+    "grad_clip": 1.0,
+    "seed": 42
+  },
+  "data": {
+    "train_samples": 5734,
+    "val_samples": 1433,
+    "emg_shape": [
+      5734,
+      128,
+      400
+    ],
+    "paper_replication": false,
+    "emg_transform": "log1p",
+    "input_mode": "raw",
+    "rms_subframes": 25,
+    "input_scaler": "standard",
+    "target_scaler": "standard",
+    "train_target_lag": 1,
+    "enable_lag_sweep": false,
+    "lag_sweep_max": 30,
+    "checkpoint_selection": "r2"
+  },
+  "device": "cuda",
+  "output_dir": "C:\\Users\\NML\\Documents\\Github\\sEMG-model\\sEMG_sleeve\\outputs_geometry"
+}
