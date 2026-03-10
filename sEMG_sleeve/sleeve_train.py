@@ -17,16 +17,21 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.stats import pearsonr
-from sleeve_geometry_model import SleeveGeometryAttentionModel
 from sleeve_model import SleeveCNNAttentionImproved
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
+try:
+    from sleeve_geometry_model import SleeveGeometryAttentionModel
+except ImportError:
+    SleeveGeometryAttentionModel = None
+
 # ── CONFIG ───────────────────────────────────────────────────
 BASE_DIR = Path(__file__).resolve().parent
 PROCESSED_DIR = "processed data"
+AUGMENTED_DIR = "augmented data"
 OUTPUT_DIR = "outputs"
 BATCH_SIZE = 256
 EPOCHS = 150
@@ -65,19 +70,21 @@ MODEL_REGISTRY = {
         "weight_decay": WEIGHT_DECAY,
         "dropout": DROPOUT,
     },
-    "geometry": {
+}
+
+if SleeveGeometryAttentionModel is not None:
+    MODEL_REGISTRY["geometry"] = {
         "cls": SleeveGeometryAttentionModel,
         "architecture": "SleeveGeometryAttentionModel",
         "default_output_dir": f"{OUTPUT_DIR}_geometry",
         "default_batch_size": 32,
         "epochs": 80,
-        "lr": 1e-5,
-        "eta_min": 1e-6,
+        "lr": 3e-5,
+        "eta_min": 1e-5,
         "warmup_epochs": 10,
         "weight_decay": 5e-4,
         "dropout": 0.10,
-    },
-}
+    }
 
 
 def parse_args():
@@ -105,6 +112,21 @@ def parse_args():
         default=None,
         help="Optional batch size override. If omitted, uses a model-specific default.",
     )
+    parser.add_argument(
+        "--data-source",
+        choices=("processed", "augmented"),
+        default="processed",
+        help="Choose whether to train from processed data or augmented data.",
+    )
+    parser.add_argument(
+        "--data-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional custom directory containing `*_train.npz` and `*_val.npz` files. "
+            "Overrides --data-source if provided."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -116,6 +138,18 @@ def resolve_output_dir(cli_value, model_key):
     if not out_dir.is_absolute():
         out_dir = BASE_DIR / out_dir
     return out_dir
+
+
+def resolve_data_dir(cli_value, data_source):
+    if cli_value is not None:
+        data_dir = Path(cli_value)
+        if not data_dir.is_absolute():
+            data_dir = BASE_DIR / data_dir
+        return data_dir
+
+    if data_source == "augmented":
+        return BASE_DIR / AUGMENTED_DIR
+    return BASE_DIR / PROCESSED_DIR
 
 
 def resolve_training_hparams(model_key, batch_size_override=None):
@@ -133,8 +167,8 @@ def resolve_training_hparams(model_key, batch_size_override=None):
 
 # ── DATASET (Multi-File Loader) ──────────────────────────────
 class NpzDataset(Dataset):
-    def __init__(self, split="train"):
-        root = BASE_DIR / PROCESSED_DIR
+    def __init__(self, split="train", root=None):
+        root = Path(root) if root is not None else BASE_DIR / PROCESSED_DIR
         files = sorted(root.glob(f"*_{split}.npz"))
         assert len(files) > 0, f"No *_{split}.npz files found in {root}"
 
@@ -503,17 +537,19 @@ def main():
     np.random.seed(SEED)
 
     out_dir = resolve_output_dir(args.output_dir, model_key)
+    data_dir = resolve_data_dir(args.data_dir, args.data_source)
     out_dir.mkdir(exist_ok=True)
 
     print(f"Device: {DEVICE}")
     print(f"Model: {model_key} ({model_spec['architecture']})")
     print(f"Outputs: {out_dir}")
+    print(f"Data: {data_dir}")
     print(f"Batch size: {batch_size}")
     print(f"LR: {lr:.2e} | Epochs: {epochs} | Warmup: {warmup_epochs}")
     print("=" * 60)
 
-    train_ds = NpzDataset("train")
-    val_ds = NpzDataset("val")
+    train_ds = NpzDataset("train", root=data_dir)
+    val_ds = NpzDataset("val", root=data_dir)
     print(f"Startup | dataset load: {time.perf_counter() - startup_t0:.1f}s")
 
     train_ds.X = _normalize_emg_shape(train_ds.X)
@@ -641,6 +677,8 @@ def main():
             "seed": SEED,
         },
         "data": {
+            "data_source": args.data_source,
+            "data_dir": str(data_dir),
             "train_samples": len(train_ds),
             "val_samples": len(val_ds),
             "emg_shape": list(train_ds.X.shape),
