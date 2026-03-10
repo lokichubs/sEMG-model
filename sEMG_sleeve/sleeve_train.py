@@ -3,6 +3,7 @@ sleeve_train.py
 Training loop for temporal-window SleeveCNNAttentionImproved.
 """
 
+import argparse
 import json
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -16,6 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.stats import pearsonr
+from sleeve_geometry_model import SleeveGeometryAttentionModel
 from sleeve_model import SleeveCNNAttentionImproved
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -48,6 +50,52 @@ CHECKPOINT_SELECTION = "r2"  # "r2" | "lag_r2"
 DROPOUT = 0.15
 NPZ_LOAD_WORKERS = 8
 EXPECTED_CHANNELS = 128
+
+
+MODEL_REGISTRY = {
+    "baseline": {
+        "cls": SleeveCNNAttentionImproved,
+        "architecture": "SleeveCNNAttentionImproved",
+        "default_output_dir": OUTPUT_DIR,
+    },
+    "geometry": {
+        "cls": SleeveGeometryAttentionModel,
+        "architecture": "SleeveGeometryAttentionModel",
+        "default_output_dir": f"{OUTPUT_DIR}_geometry",
+    },
+}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(
+        description="Train a sleeve EMG model on processed NPZ windows."
+    )
+    parser.add_argument(
+        "--model",
+        choices=sorted(MODEL_REGISTRY.keys()),
+        default="baseline",
+        help="Which model architecture to train.",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=None,
+        help=(
+            "Optional output directory for checkpoints and logs. "
+            "Relative paths are resolved from the sEMG_sleeve folder."
+        ),
+    )
+    return parser.parse_args()
+
+
+def resolve_output_dir(cli_value, model_key):
+    if cli_value is None:
+        return BASE_DIR / MODEL_REGISTRY[model_key]["default_output_dir"]
+
+    out_dir = Path(cli_value)
+    if not out_dir.is_absolute():
+        out_dir = BASE_DIR / out_dir
+    return out_dir
 
 
 # ── DATASET (Multi-File Loader) ──────────────────────────────
@@ -393,6 +441,10 @@ def evaluate(model, loader, criterion, device, inv_target_fn=None, return_arrays
 # ── MAIN ─────────────────────────────────────────────────────
 def main():
     startup_t0 = time.perf_counter()
+    args = parse_args()
+    model_key = args.model
+    model_spec = MODEL_REGISTRY[model_key]
+
     emg_transform = EMG_TRANSFORM
     input_mode = INPUT_MODE
     rms_subframes = RMS_SUBFRAMES
@@ -409,10 +461,12 @@ def main():
     torch.manual_seed(SEED)
     np.random.seed(SEED)
 
-    out_dir = BASE_DIR / OUTPUT_DIR
+    out_dir = resolve_output_dir(args.output_dir, model_key)
     out_dir.mkdir(exist_ok=True)
 
     print(f"Device: {DEVICE}")
+    print(f"Model: {model_key} ({model_spec['architecture']})")
+    print(f"Outputs: {out_dir}")
     print("=" * 60)
 
     train_ds = NpzDataset("train")
@@ -499,7 +553,7 @@ def main():
         pin_memory=True,
     )
 
-    model = SleeveCNNAttentionImproved(
+    model = model_spec["cls"](
         window_size=window_size,
         n_ch=n_channels,
         n_joints=n_joints,
@@ -518,13 +572,15 @@ def main():
 
     config = {
         "model": {
-            "architecture": "SleeveCNNAttentionImproved",
+            "model_key": model_key,
+            "architecture": model_spec["architecture"],
             "n_ch": n_channels,
             "window_size": window_size,
             "n_joints": n_joints,
             "hidden": int(getattr(model, "hidden", -1)),
             "n_attn": int(getattr(model, "n_attn", -1)),
             "n_heads": int(getattr(model, "n_heads", -1)),
+            "geom_ch": int(getattr(model, "geom_ch", -1)),
             "parameters": model.count_params(),
         },
         "training": {
@@ -557,6 +613,7 @@ def main():
             "checkpoint_selection": CHECKPOINT_SELECTION,
         },
         "device": DEVICE,
+        "output_dir": str(out_dir),
     }
     with open(out_dir / "config.json", "w") as f:
         json.dump(config, f, indent=2)

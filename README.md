@@ -1,6 +1,6 @@
 # sEMG-model
 
-Temporal sEMG-to-joint-angle regression using a CNN + attention model on Ninapro-style windowed EMG data.
+Temporal sEMG-to-joint-angle regression using a CNN + attention model on Ninapro-style windowed EMG data. Will be adapted for real-time prediction using our own markerless-mocap + sEMG sleeve data pipeline.  
 
 ## Quick start
 
