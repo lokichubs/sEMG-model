@@ -124,7 +124,7 @@ def process_sleeve_file(
     step_len=100,
     emg_lowcut=20.0,
     emg_highcut=500.0,
-    angle_lowpass=5.0,
+    angle_lowpass=0.0,
     train_fraction=0.8,
     label_position="center",
 ):
@@ -341,8 +341,8 @@ def main():
     parser.add_argument(
         "--angle_lowpass",
         type=float,
-        default=5.0,
-        help="Angle lowpass cutoff in Hz; set <=0 to disable (default: 5)",
+        default=0.0,
+        help="Angle lowpass cutoff in Hz; set <=0 to disable (default: disabled)",
     )
     parser.add_argument(
         "--label_position",
