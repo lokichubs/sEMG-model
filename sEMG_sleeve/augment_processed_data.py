@@ -84,7 +84,7 @@ def parse_args():
     parser.add_argument(
         "--copies",
         type=int,
-        default=2,
+        default=1,
         help="Number of augmented copies to create for each training sample.",
     )
     parser.add_argument(

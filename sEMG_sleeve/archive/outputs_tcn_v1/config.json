@@ -1,15 +1,22 @@
 {
   "model": {
-    "model_key": "baseline",
-    "architecture": "SleeveCNNAttentionImproved",
+    "model_key": "tcn",
+    "architecture": "SleeveTCNRegressor",
     "n_ch": 128,
     "window_size": 400,
     "n_joints": 14,
-    "hidden": 192,
-    "n_attn": 2,
-    "n_heads": 2,
+    "hidden": 256,
+    "n_attn": -1,
+    "n_heads": -1,
+    "kernel_size": 5,
+    "dilations": [
+      1,
+      2,
+      4,
+      8
+    ],
     "geom_ch": -1,
-    "parameters": 1827938
+    "parameters": 773075
   },
   "training": {
     "batch_size": 64,
@@ -18,7 +25,7 @@
     "eta_min": 3e-05,
     "warmup_epochs": 5,
     "weight_decay": 0.003,
-    "dropout": 0.2,
+    "dropout": 0.15,
     "optimizer": "AdamW",
     "scheduler": "CosineAnnealingLR",
     "loss": "SmoothL1Loss(beta=0.5)",
@@ -47,5 +54,5 @@
     "checkpoint_selection": "r2"
   },
   "device": "cuda",
-  "output_dir": "C:\\Users\\NML\\Documents\\Github\\sEMG-model\\sEMG_sleeve\\outputs"
+  "output_dir": "C:\\Users\\NML\\Documents\\Github\\sEMG-model\\sEMG_sleeve\\outputs_tcn"
 }

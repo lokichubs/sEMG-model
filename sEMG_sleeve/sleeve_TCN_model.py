@@ -11,7 +11,6 @@ Design goals:
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class TemporalSE(nn.Module):
@@ -124,7 +123,7 @@ class SleeveTCNRegressor(nn.Module):
         n_ch: int = 128,
         window_size: int = 400,
         n_joints: int = 14,
-        hidden: int = 128,
+        hidden: int = 256,
         kernel_size: int = 5,
         dilations=(1, 2, 4, 8),
         dropout: float = 0.15,

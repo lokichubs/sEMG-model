@@ -18,6 +18,7 @@ import torch
 import torch.nn as nn
 from scipy.stats import pearsonr
 from sleeve_model import SleeveCNNAttentionImproved
+from sleeve_TCN_model import SleeveTCNRegressor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader, Dataset
@@ -70,6 +71,18 @@ MODEL_REGISTRY = {
         "warmup_epochs": WARMUP_EPOCHS,
         "weight_decay": WEIGHT_DECAY,
         "dropout": DROPOUT,
+    },
+    "tcn": {
+        "cls": SleeveTCNRegressor,
+        "architecture": "SleeveTCNRegressor",
+        "default_output_dir": f"{OUTPUT_DIR}_tcn",
+        "default_batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "eta_min": ETA_MIN,
+        "warmup_epochs": WARMUP_EPOCHS,
+        "weight_decay": WEIGHT_DECAY,
+        "dropout": 0.15,
     },
 }
 
@@ -660,6 +673,8 @@ def main():
             "hidden": int(getattr(model, "hidden", -1)),
             "n_attn": int(getattr(model, "n_attn", -1)),
             "n_heads": int(getattr(model, "n_heads", -1)),
+            "kernel_size": int(getattr(model, "kernel_size", -1)),
+            "dilations": list(getattr(model, "dilations", ())),
             "geom_ch": int(getattr(model, "geom_ch", -1)),
             "parameters": model.count_params(),
         },
