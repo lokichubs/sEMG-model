@@ -35,24 +35,25 @@ AUGMENTED_DIR = "augmented data"
 OUTPUT_DIR = "outputs"
 BATCH_SIZE = 64
 EPOCHS = 150
-LR = 3e-4
+LR = 5e-5
 ETA_MIN = 3e-5
 WARMUP_EPOCHS = 5
-WEIGHT_DECAY = 3e-4
+WEIGHT_DECAY = 3e-3
 N_WORKERS = 0
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 SEED = 42
 PAPER_REPLICATION = False
-EMG_TRANSFORM = "log1p"  # "none" | "log1p"
+EMG_TRANSFORM = "none"  # "none" | "log1p"
 INPUT_MODE = "raw"  # "raw" | "rms_subframes"
-RMS_SUBFRAMES = 25
+RMS_SUBFRAMES = 100
 INPUT_SCALER = "standard"  # "none" | "standard"
 TARGET_SCALER = "standard"  # "none" | "standard" | "minmax"
 TRAIN_TARGET_LAG = 0
 ENABLE_LAG_SWEEP = False
 LAG_SWEEP_MAX = 30
 CHECKPOINT_SELECTION = "r2"  # "r2" | "lag_r2"
-DROPOUT = 0.15
+EARLY_STOPPING_PATIENCE = 15
+DROPOUT = 0.2
 NPZ_LOAD_WORKERS = 8
 EXPECTED_CHANNELS = 128
 
@@ -716,6 +717,7 @@ def main():
 
     lag_sweep_last = []
     best_score = float("-inf")
+    patience_counter = 0
 
     epoch_bar = tqdm(range(1, epochs + 1), desc="Training")
     for epoch in epoch_bar:
@@ -781,6 +783,7 @@ def main():
         if score > best_score:
             best_score = score
             best_r2 = r2
+            patience_counter = 0
             torch.save(model.state_dict(), out_dir / "best_model.pt")
             scaler_artifacts = {}
             if x_scale_params["mode"] == "standard":

@@ -11,13 +11,13 @@ import math
 
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class CircularElectrodeConv(nn.Module):
     def __init__(self, out_ch=16, elec_k=3, time_k=5):
         super().__init__()
         self.elec_pad = elec_k // 2
+        self.act = nn.ELU()
         self.conv = nn.Conv2d(
             in_channels=1,
             out_channels=out_ch,
@@ -34,7 +34,7 @@ class CircularElectrodeConv(nn.Module):
             )
         x = self.conv(x)
         x = self.bn(x)
-        return F.relu(x)
+        return self.act(x)
 
 
 class MultiScaleConv1D(nn.Module):
@@ -54,11 +54,11 @@ class MultiScaleConv1D(nn.Module):
         )
         merged = branch_ch * len(kernels)
         self.bn = nn.BatchNorm1d(merged)
-        self.act = nn.ReLU()
+        self.act = nn.ELU()
         self.proj = nn.Sequential(
             nn.Conv1d(merged, out_ch, kernel_size=1, bias=False),
             nn.BatchNorm1d(out_ch),
-            nn.ReLU(),
+            nn.ELU(),
         )
 
     def forward(self, x):
@@ -81,7 +81,7 @@ class AttentionBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_model * ff_mult),
-            nn.ReLU(),
+            nn.ELU(),
             nn.Dropout(dropout),
             nn.Linear(d_model * ff_mult, d_model),
         )
@@ -127,9 +127,9 @@ class SleeveCNNAttentionImproved(nn.Module):
         n_ch=128,
         window_size=400,
         n_joints=14,
-        hidden=256,
-        n_attn=4,
-        n_heads=4,
+        hidden=192,
+        n_attn=2,
+        n_heads=2,
         dropout=0.15,
     ):
         super().__init__()
@@ -149,7 +149,7 @@ class SleeveCNNAttentionImproved(nn.Module):
         self.pre = nn.Sequential(
             nn.Conv1d(16 * n_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm1d(hidden),
-            nn.ReLU(),
+            nn.ELU(),
         )
 
         self.ms1 = MultiScaleConv1D(
@@ -170,8 +170,8 @@ class SleeveCNNAttentionImproved(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Linear(hidden, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2),
+            nn.ELU(),
+            nn.Dropout(dropout * 2 if dropout * 2 <= 0.5 else 0.5),
         )
         self.head = KinematicCouplingHead(in_dim=128, n_joints=n_joints)
 
@@ -220,8 +220,8 @@ class KinematicLoss(nn.Module):
 
 
 if __name__ == "__main__":
-    model = SleeveCNNAttentionImproved(window_size=400, n_ch=128, n_joints=14)
-    dummy = torch.randn(8, 128, 400)
+    model = SleeveCNNAttentionImproved(window_size=200, n_ch=128, n_joints=14)
+    dummy = torch.randn(8, 128, 200)
     out = model(dummy)
     print(f"Input : {dummy.shape}")
     print(f"Output: {out.shape}")

@@ -121,12 +121,14 @@ def process_sleeve_file(
     emg_stream_name=DEFAULT_EMG_STREAM,
     angle_stream_name=DEFAULT_ANGLE_STREAM,
     window_len=400,
-    step_len=100,
+    step_len=50,
     emg_lowcut=20.0,
     emg_highcut=500.0,
-    angle_lowpass=0.0,
+    angle_lowpass=5.0,
     train_fraction=0.8,
-    label_position="center",
+    label_position="last",
+    split_mode="blocked",
+    val_block_period=5,
 ):
     print(f"Processing {xdf_file_path}...")
 
@@ -230,12 +232,31 @@ def process_sleeve_file(
     window_time = (emg_ts[w_idx] - shared_start).astype(np.float32)
 
     n_windows = w_emg.shape[0]
-    split_idx = int(np.floor(n_windows * train_fraction))
-    split_idx = min(max(split_idx, 1), n_windows - 1) if n_windows > 1 else n_windows
 
-    train_mask = np.zeros(n_windows, dtype=bool)
-    train_mask[:split_idx] = True
+    if split_mode == "chronological":
+        split_idx = int(np.floor(n_windows * train_fraction))
+        split_idx = (
+            min(max(split_idx, 1), n_windows - 1) if n_windows > 1 else n_windows
+        )
+        train_mask = np.zeros(n_windows, dtype=bool)
+        train_mask[:split_idx] = True
+    elif split_mode == "blocked":
+        # Divide session into equal-sized blocks. Every val_block_period-th
+        # block goes to validation, the rest to training.  With the default
+        # val_block_period=5, ~20% of data is val — matching train_fraction=0.8.
+        n_blocks = max(
+            val_block_period, int(round(val_block_period / (1.0 - train_fraction)))
+        )
+        block_size = max(1, n_windows // n_blocks)
+        block_ids = np.minimum(np.arange(n_windows) // block_size, n_blocks - 1)
+        train_mask = (block_ids % val_block_period) != 0
+    else:
+        raise ValueError(f"Unknown split_mode: {split_mode}")
+
     val_mask = ~train_mask
+    print(
+        f"  Split mode: {split_mode} | train={train_mask.sum()}, val={val_mask.sum()}"
+    )
 
     stem = Path(xdf_file_path).stem
     if stem.endswith("_meg"):
@@ -312,13 +333,13 @@ def main():
         "--window_len",
         type=int,
         default=400,
-        help="Window length in EMG samples (default: 400)",
+        help="Window length in EMG samples (default: 200 = 100ms at 2kHz)",
     )
     parser.add_argument(
         "--step_len",
         type=int,
-        default=100,
-        help="Step length in EMG samples (default: 100)",
+        default=50,
+        help="Step length in EMG samples (default: 50 = 25ms at 2kHz)",
     )
     parser.add_argument(
         "--train_fraction",
@@ -341,14 +362,34 @@ def main():
     parser.add_argument(
         "--angle_lowpass",
         type=float,
-        default=0.0,
-        help="Angle lowpass cutoff in Hz; set <=0 to disable (default: disabled)",
+        default=5.0,
+        help="Angle lowpass cutoff in Hz; set <=0 to disable (default: 5.0)",
+    )
+    parser.add_argument(
+        "--split_mode",
+        choices=["chronological", "blocked"],
+        default="blocked",
+        help=(
+            "How to split windows into train/val. "
+            "'chronological' puts the first train_fraction in train and the rest in val. "
+            "'blocked' interleaves train/val blocks throughout the session to reduce "
+            "temporal distribution shift (default: blocked)."
+        ),
+    )
+    parser.add_argument(
+        "--val_block_period",
+        type=int,
+        default=5,
+        help=(
+            "For blocked split: every Nth block is validation (default: 5, i.e. ~20%% val). "
+            "Ignored when split_mode=chronological."
+        ),
     )
     parser.add_argument(
         "--label_position",
         choices=["center", "last"],
-        default="center",
-        help="Which sample inside each window supplies the target label (default: center)",
+        default="last",
+        help="Which sample inside each window supplies the target label (default: last)",
     )
 
     args = parser.parse_args()
@@ -376,6 +417,8 @@ def main():
             angle_lowpass=args.angle_lowpass,
             train_fraction=args.train_fraction,
             label_position=args.label_position,
+            split_mode=args.split_mode,
+            val_block_period=args.val_block_period,
         )
 
 
