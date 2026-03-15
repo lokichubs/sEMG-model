@@ -121,7 +121,7 @@ def process_sleeve_file(
     emg_stream_name=DEFAULT_EMG_STREAM,
     angle_stream_name=DEFAULT_ANGLE_STREAM,
     window_len=400,
-    step_len=50,
+    step_len=100,
     emg_lowcut=20.0,
     emg_highcut=500.0,
     angle_lowpass=5.0,
@@ -332,7 +332,7 @@ def main():
     parser.add_argument(
         "--window_len",
         type=int,
-        default=400,
+        default=200,
         help="Window length in EMG samples (default: 200 = 100ms at 2kHz)",
     )
     parser.add_argument(
