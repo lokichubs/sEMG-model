@@ -13,11 +13,26 @@ import torch
 import torch.nn as nn
 
 
+def build_activation(name):
+    key = str(name).strip().lower()
+    if key == "elu":
+        return nn.ELU()
+    if key == "relu":
+        return nn.ReLU()
+    if key == "gelu":
+        return nn.GELU()
+    if key == "silu":
+        return nn.SiLU()
+    if key in ("leaky_relu", "lrelu"):
+        return nn.LeakyReLU(negative_slope=0.01)
+    raise ValueError(f"Unsupported activation: {name}")
+
+
 class CircularElectrodeConv(nn.Module):
-    def __init__(self, out_ch=16, elec_k=3, time_k=5):
+    def __init__(self, out_ch=16, elec_k=3, time_k=5, activation="elu"):
         super().__init__()
         self.elec_pad = elec_k // 2
-        self.act = nn.ELU()
+        self.act = build_activation(activation)
         self.conv = nn.Conv2d(
             in_channels=1,
             out_channels=out_ch,
@@ -38,7 +53,14 @@ class CircularElectrodeConv(nn.Module):
 
 
 class MultiScaleConv1D(nn.Module):
-    def __init__(self, in_ch, kernels=(3, 5, 7, 9), branch_ch=48, out_ch=192):
+    def __init__(
+        self,
+        in_ch,
+        kernels=(3, 5, 7, 9),
+        branch_ch=48,
+        out_ch=192,
+        activation="elu",
+    ):
         super().__init__()
         self.branches = nn.ModuleList(
             [
@@ -54,11 +76,11 @@ class MultiScaleConv1D(nn.Module):
         )
         merged = branch_ch * len(kernels)
         self.bn = nn.BatchNorm1d(merged)
-        self.act = nn.ELU()
+        self.act = build_activation(activation)
         self.proj = nn.Sequential(
             nn.Conv1d(merged, out_ch, kernel_size=1, bias=False),
             nn.BatchNorm1d(out_ch),
-            nn.ELU(),
+            build_activation(activation),
         )
 
     def forward(self, x):
@@ -68,7 +90,14 @@ class MultiScaleConv1D(nn.Module):
 
 
 class AttentionBlock(nn.Module):
-    def __init__(self, d_model=192, n_heads=4, dropout=0.15, ff_mult=4):
+    def __init__(
+        self,
+        d_model=192,
+        n_heads=4,
+        dropout=0.15,
+        ff_mult=4,
+        ff_activation="elu",
+    ):
         super().__init__()
         self.attn = nn.MultiheadAttention(
             embed_dim=d_model,
@@ -81,7 +110,7 @@ class AttentionBlock(nn.Module):
         self.drop = nn.Dropout(dropout)
         self.ff = nn.Sequential(
             nn.Linear(d_model, d_model * ff_mult),
-            nn.ELU(),
+            build_activation(ff_activation),
             nn.Dropout(dropout),
             nn.Linear(d_model * ff_mult, d_model),
         )
@@ -131,6 +160,10 @@ class SleeveCNNAttentionImproved(nn.Module):
         n_attn=4,
         n_heads=2,
         dropout=0.15,
+        use_circ=True,
+        cnn_activation="elu",
+        attn_ff_activation="elu",
+        mlp_activation="elu",
     ):
         super().__init__()
         if hidden % n_heads != 0:
@@ -144,33 +177,60 @@ class SleeveCNNAttentionImproved(nn.Module):
         self.hidden = hidden
         self.n_attn = n_attn
         self.n_heads = n_heads
+        self.use_circ = bool(use_circ)
+        self.cnn_activation = str(cnn_activation)
+        self.attn_ff_activation = str(attn_ff_activation)
+        self.mlp_activation = str(mlp_activation)
 
-        self.circ = CircularElectrodeConv(out_ch=16, elec_k=3, time_k=5)
+        if self.use_circ:
+            self.circ = CircularElectrodeConv(
+                out_ch=16,
+                elec_k=3,
+                time_k=5,
+                activation=self.cnn_activation,
+            )
+            pre_in_ch = 16 * n_ch
+        else:
+            self.circ = None
+            pre_in_ch = n_ch
         self.pre = nn.Sequential(
-            nn.Conv1d(16 * n_ch, hidden, kernel_size=1, bias=False),
+            nn.Conv1d(pre_in_ch, hidden, kernel_size=1, bias=False),
             nn.BatchNorm1d(hidden),
-            nn.ELU(),
+            build_activation(self.cnn_activation),
         )
 
         self.ms1 = MultiScaleConv1D(
-            in_ch=hidden, kernels=(3, 5, 7, 9), branch_ch=48, out_ch=hidden
+            in_ch=hidden,
+            kernels=(3, 5, 7, 9),
+            branch_ch=48,
+            out_ch=hidden,
+            activation=self.cnn_activation,
         )
         self.pool = nn.AvgPool1d(kernel_size=2, stride=2, ceil_mode=True)
         self.ms2 = MultiScaleConv1D(
-            in_ch=hidden, kernels=(3, 5, 7, 9), branch_ch=48, out_ch=hidden
+            in_ch=hidden,
+            kernels=(3, 5, 7, 9),
+            branch_ch=48,
+            out_ch=hidden,
+            activation=self.cnn_activation,
         )
 
         self.pos_enc = PositionalEncoding(hidden, dropout=dropout)
         self.attn_layers = nn.ModuleList(
             [
-                AttentionBlock(hidden, n_heads=n_heads, dropout=dropout)
+                AttentionBlock(
+                    hidden,
+                    n_heads=n_heads,
+                    dropout=dropout,
+                    ff_activation=self.attn_ff_activation,
+                )
                 for _ in range(n_attn)
             ]
         )
 
         self.mlp = nn.Sequential(
             nn.Linear(hidden, 128),
-            nn.ELU(),
+            build_activation(self.mlp_activation),
             nn.Dropout(dropout * 2 if dropout * 2 <= 0.5 else 0.5),
         )
         self.head = KinematicCouplingHead(in_dim=128, n_joints=n_joints)
@@ -184,8 +244,9 @@ class SleeveCNNAttentionImproved(nn.Module):
                 f"Expected window size {self.window_size}, got {timesteps}"
             )
 
-        x = self.circ(x.unsqueeze(1))
-        x = x.reshape(bsz, -1, timesteps)
+        if self.use_circ:
+            x = self.circ(x.unsqueeze(1))
+            x = x.reshape(bsz, -1, timesteps)
         x = self.pre(x)
 
         x = self.ms1(x)

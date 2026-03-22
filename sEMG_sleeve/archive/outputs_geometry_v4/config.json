@@ -1,0 +1,53 @@
+{
+  "model": {
+    "model_key": "geometry",
+    "architecture": "SleeveGeometryAttentionModel",
+    "n_ch": 128,
+    "window_size": 200,
+    "n_joints": 14,
+    "hidden": 256,
+    "n_attn": 4,
+    "n_heads": 2,
+    "kernel_size": -1,
+    "dilations": [],
+    "geom_ch": 16,
+    "parameters": 4408898
+  },
+  "training": {
+    "batch_size": 64,
+    "epochs": 150,
+    "lr": 5e-05,
+    "eta_min": 3e-05,
+    "warmup_epochs": 5,
+    "weight_decay": 0.0003,
+    "dropout": 0.2,
+    "optimizer": "AdamW",
+    "scheduler": "CosineAnnealingLR",
+    "loss": "SmoothL1Loss(beta=0.5)",
+    "grad_clip": 1.0,
+    "seed": 42
+  },
+  "data": {
+    "data_source": "processed",
+    "data_dir": "C:\\Users\\NML\\Documents\\Github\\sEMG-model\\sEMG_sleeve\\processed data",
+    "train_samples": 95709,
+    "val_samples": 23910,
+    "emg_shape": [
+      95709,
+      128,
+      200
+    ],
+    "paper_replication": false,
+    "emg_transform": "none",
+    "input_mode": "raw",
+    "rms_subframes": 100,
+    "input_scaler": "standard",
+    "target_scaler": "standard",
+    "train_target_lag": 0,
+    "enable_lag_sweep": false,
+    "lag_sweep_max": 30,
+    "checkpoint_selection": "r2"
+  },
+  "device": "cuda",
+  "output_dir": "C:\\Users\\NML\\Documents\\Github\\sEMG-model\\sEMG_sleeve\\outputs_geometry"
+}

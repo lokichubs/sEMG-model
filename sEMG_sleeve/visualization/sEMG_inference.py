@@ -279,6 +279,9 @@ def build_model(config: dict[str, Any]) -> torch.nn.Module:
             n_attn=int(model_cfg["n_attn"]),
             n_heads=int(model_cfg["n_heads"]),
             dropout=float(train_cfg["dropout"]),
+            cnn_activation=str(model_cfg.get("cnn_activation", "elu")),
+            attn_ff_activation=str(model_cfg.get("attn_ff_activation", "elu")),
+            mlp_activation=str(model_cfg.get("mlp_activation", "elu")),
         )
         return model
 
@@ -387,7 +390,9 @@ def load_stream_data(
         raise RuntimeError("No fully finite interpolated angle columns remained.")
     gt_angles = gt_angles[:, finite_cols].astype(np.float32)
 
-    valid_rows = (~np.isnan(filtered_emg).all(axis=1)) & (~np.isnan(gt_angles).all(axis=1))
+    valid_rows = (~np.isnan(filtered_emg).all(axis=1)) & (
+        ~np.isnan(gt_angles).all(axis=1)
+    )
     dropped_rows = int(valid_rows.size - np.count_nonzero(valid_rows))
     if dropped_rows > 0:
         filtered_emg = filtered_emg[valid_rows]
@@ -396,7 +401,9 @@ def load_stream_data(
         print(f"Dropped {dropped_rows} all-NaN aligned row(s) before visualization.")
 
     if filtered_emg.shape[0] == 0 or gt_angles.shape[0] == 0:
-        raise RuntimeError("No valid aligned samples remained after dropping all-NaN rows.")
+        raise RuntimeError(
+            "No valid aligned samples remained after dropping all-NaN rows."
+        )
 
     return filtered_emg, gt_angles, emg_ts, float(fs_emg)
 

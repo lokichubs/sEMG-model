@@ -71,6 +71,9 @@ MODEL_REGISTRY = {
         "warmup_epochs": WARMUP_EPOCHS,
         "weight_decay": WEIGHT_DECAY,
         "dropout": DROPOUT,
+        "cnn_activation": "elu",
+        "attn_ff_activation": "elu",
+        "mlp_activation": "elu",
     },
     "tcn": {
         "cls": SleeveTCNRegressor,
@@ -91,13 +94,13 @@ if SleeveGeometryAttentionModel is not None:
         "cls": SleeveGeometryAttentionModel,
         "architecture": "SleeveGeometryAttentionModel",
         "default_output_dir": f"{OUTPUT_DIR}_geometry",
-        "default_batch_size": 32,
-        "epochs": 80,
-        "lr": 3e-5,
-        "eta_min": 1e-5,
-        "warmup_epochs": 10,
-        "weight_decay": 5e-4,
-        "dropout": 0.10,
+        "default_batch_size": BATCH_SIZE,
+        "epochs": EPOCHS,
+        "lr": LR,
+        "eta_min": ETA_MIN,
+        "warmup_epochs": WARMUP_EPOCHS,
+        "weight_decay": WEIGHT_DECAY,
+        "dropout": DROPOUT,
     }
 
 
@@ -105,6 +108,7 @@ def parse_args():
     parser = argparse.ArgumentParser(
         description="Train a sleeve EMG model on processed NPZ windows."
     )
+    activation_choices = ("elu", "relu", "gelu", "silu", "leaky_relu")
     parser.add_argument(
         "--model",
         choices=sorted(MODEL_REGISTRY.keys()),
@@ -140,6 +144,24 @@ def parse_args():
             "Optional custom directory containing `*_train.npz` and `*_val.npz` files. "
             "Overrides --data-source if provided."
         ),
+    )
+    parser.add_argument(
+        "--cnn-activation",
+        choices=activation_choices,
+        default=None,
+        help="Baseline only: activation for CNN blocks.",
+    )
+    parser.add_argument(
+        "--attn-ff-activation",
+        choices=activation_choices,
+        default=None,
+        help="Baseline only: activation inside attention feed-forward blocks.",
+    )
+    parser.add_argument(
+        "--mlp-activation",
+        choices=activation_choices,
+        default=None,
+        help="Baseline only: activation for the final MLP head.",
     )
     return parser.parse_args()
 
@@ -533,6 +555,17 @@ def main():
     warmup_epochs = train_cfg["warmup_epochs"]
     weight_decay = train_cfg["weight_decay"]
     dropout = train_cfg["dropout"]
+    baseline_cnn_activation = model_spec.get("cnn_activation", "elu")
+    baseline_attn_ff_activation = model_spec.get("attn_ff_activation", "elu")
+    baseline_mlp_activation = model_spec.get("mlp_activation", "elu")
+
+    if model_key == "baseline":
+        if args.cnn_activation is not None:
+            baseline_cnn_activation = args.cnn_activation
+        if args.attn_ff_activation is not None:
+            baseline_attn_ff_activation = args.attn_ff_activation
+        if args.mlp_activation is not None:
+            baseline_mlp_activation = args.mlp_activation
 
     emg_transform = EMG_TRANSFORM
     input_mode = INPUT_MODE
@@ -560,6 +593,13 @@ def main():
     print(f"Data: {data_dir}")
     print(f"Batch size: {batch_size}")
     print(f"LR: {lr:.2e} | Epochs: {epochs} | Warmup: {warmup_epochs}")
+    if model_key == "baseline":
+        print(
+            "Activations: "
+            f"cnn={baseline_cnn_activation}, "
+            f"attn_ff={baseline_attn_ff_activation}, "
+            f"mlp={baseline_mlp_activation}"
+        )
     print("=" * 60)
 
     train_ds = NpzDataset("train", root=data_dir)
@@ -651,6 +691,15 @@ def main():
         n_ch=n_channels,
         n_joints=n_joints,
         dropout=dropout,
+        **(
+            {
+                "cnn_activation": baseline_cnn_activation,
+                "attn_ff_activation": baseline_attn_ff_activation,
+                "mlp_activation": baseline_mlp_activation,
+            }
+            if model_key == "baseline"
+            else {}
+        ),
     ).to(DEVICE)
     optimizer = AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
     scheduler = CosineAnnealingLR(
@@ -676,6 +725,9 @@ def main():
             "kernel_size": int(getattr(model, "kernel_size", -1)),
             "dilations": list(getattr(model, "dilations", ())),
             "geom_ch": int(getattr(model, "geom_ch", -1)),
+            "cnn_activation": getattr(model, "cnn_activation", ""),
+            "attn_ff_activation": getattr(model, "attn_ff_activation", ""),
+            "mlp_activation": getattr(model, "mlp_activation", ""),
             "parameters": model.count_params(),
         },
         "training": {
