@@ -157,7 +157,7 @@ class SleeveCNNAttentionImproved(nn.Module):
         window_size=400,
         n_joints=14,
         hidden=256,
-        n_attn=4,
+        n_attn=6,
         n_heads=2,
         dropout=0.15,
         use_circ=True,
