@@ -17,7 +17,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.stats import pearsonr
-from sleeve_model import SleeveCNNAttentionImproved
+from sleeve_model import BaselineKinematicsLoss, SleeveCNNAttentionImproved
 from sleeve_TCN_model import SleeveTCNRegressor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -148,20 +148,38 @@ def parse_args():
     parser.add_argument(
         "--cnn-activation",
         choices=activation_choices,
-        default=None,
+        default="elu",
         help="Baseline only: activation for CNN blocks.",
     )
     parser.add_argument(
         "--attn-ff-activation",
         choices=activation_choices,
-        default=None,
+        default="gelu",
         help="Baseline only: activation inside attention feed-forward blocks.",
     )
     parser.add_argument(
         "--mlp-activation",
         choices=activation_choices,
-        default=None,
+        default="relu",
         help="Baseline only: activation for the final MLP head.",
+    )
+    parser.add_argument(
+        "--kinematics-loss",
+        "--kinematics_loss",
+        type=lambda v: str(v).strip().lower() in ("1", "true", "t", "yes", "y"),
+        nargs="?",
+        const=True,
+        default=False,
+        help=(
+            "Baseline only: enable soft kinematic chain regularization. "
+            "Example: --kinematics-loss True"
+        ),
+    )
+    parser.add_argument(
+        "--kinematics-weight",
+        type=float,
+        default=5e-4,
+        help="Baseline only: weight for kinematics-loss term (default: 5e-4).",
     )
     return parser.parse_args()
 
@@ -467,7 +485,16 @@ def plot_curves(history, out_dir):
 
 
 # ── TRAINING LOOP ────────────────────────────────────────────
-def train_one_epoch(model, loader, optimizer, criterion, device, inv_target_fn=None):
+def train_one_epoch(
+    model,
+    loader,
+    optimizer,
+    criterion,
+    device,
+    inv_target_fn=None,
+    kinematics_loss_module=None,
+    kinematics_decode_fn=None,
+):
     model.train()
     total_loss = 0.0
     n_seen = 0
@@ -480,6 +507,11 @@ def train_one_epoch(model, loader, optimizer, criterion, device, inv_target_fn=N
         optimizer.zero_grad()
         pred = model(emg)
         loss = criterion(pred, label)
+        if kinematics_loss_module is not None:
+            pred_phys = (
+                pred if kinematics_decode_fn is None else kinematics_decode_fn(pred)
+            )
+            loss = loss + kinematics_loss_module(pred_phys)
 
         loss.backward()
         nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -505,7 +537,16 @@ def train_one_epoch(model, loader, optimizer, criterion, device, inv_target_fn=N
 
 
 @torch.no_grad()
-def evaluate(model, loader, criterion, device, inv_target_fn=None, return_arrays=False):
+def evaluate(
+    model,
+    loader,
+    criterion,
+    device,
+    inv_target_fn=None,
+    return_arrays=False,
+    kinematics_loss_module=None,
+    kinematics_decode_fn=None,
+):
     model.eval()
     total_loss = 0.0
     all_preds, all_targets = [], []
@@ -514,6 +555,11 @@ def evaluate(model, loader, criterion, device, inv_target_fn=None, return_arrays
         emg, label = emg.to(device), label.to(device)
         pred = model(emg)
         loss = criterion(pred, label)
+        if kinematics_loss_module is not None:
+            pred_phys = (
+                pred if kinematics_decode_fn is None else kinematics_decode_fn(pred)
+            )
+            loss = loss + kinematics_loss_module(pred_phys)
 
         total_loss += loss.item() * emg.size(0)
         all_preds.append(pred.cpu().numpy())
@@ -567,6 +613,11 @@ def main():
         if args.mlp_activation is not None:
             baseline_mlp_activation = args.mlp_activation
 
+    use_kinematics_loss = (
+        bool(args.kinematics_loss) if model_key == "baseline" else False
+    )
+    kinematics_weight = float(args.kinematics_weight)
+
     emg_transform = EMG_TRANSFORM
     input_mode = INPUT_MODE
     rms_subframes = RMS_SUBFRAMES
@@ -599,6 +650,10 @@ def main():
             f"cnn={baseline_cnn_activation}, "
             f"attn_ff={baseline_attn_ff_activation}, "
             f"mlp={baseline_mlp_activation}"
+        )
+        print(
+            "Kinematics loss: "
+            f"enabled={use_kinematics_loss}, weight={kinematics_weight:.2e}"
         )
     print("=" * 60)
 
@@ -709,6 +764,40 @@ def main():
     )
     criterion = nn.SmoothL1Loss(beta=0.5)
 
+    kinematics_loss_module = None
+    kinematics_decode_fn = None
+    if use_kinematics_loss:
+        kinematics_loss_module = BaselineKinematicsLoss(
+            n_joints=n_joints,
+            weight=kinematics_weight,
+        ).to(DEVICE)
+
+        target_mode = y_scale_params["mode"]
+        if target_mode == "standard":
+            y_mean = torch.as_tensor(
+                y_scale_params["mean"], dtype=torch.float32, device=DEVICE
+            )
+            y_std = torch.as_tensor(
+                y_scale_params["std"], dtype=torch.float32, device=DEVICE
+            )
+
+            def _decode_for_kinematics(pred_scaled):
+                return pred_scaled * y_std + y_mean
+
+            kinematics_decode_fn = _decode_for_kinematics
+        elif target_mode == "minmax":
+            y_min = torch.as_tensor(
+                y_scale_params["min"], dtype=torch.float32, device=DEVICE
+            )
+            y_range = torch.as_tensor(
+                y_scale_params["range"], dtype=torch.float32, device=DEVICE
+            )
+
+            def _decode_for_kinematics(pred_scaled):
+                return ((pred_scaled + 1.0) * 0.5) * y_range + y_min
+
+            kinematics_decode_fn = _decode_for_kinematics
+
     print(f"Parameters: {model.count_params():,}\n")
     print(f"Startup | ready to train: {time.perf_counter() - startup_t0:.1f}s")
 
@@ -741,6 +830,8 @@ def main():
             "optimizer": "AdamW",
             "scheduler": "CosineAnnealingLR",
             "loss": "SmoothL1Loss(beta=0.5)",
+            "kinematics_loss": use_kinematics_loss,
+            "kinematics_weight": kinematics_weight,
             "grad_clip": 1.0,
             "seed": SEED,
         },
@@ -797,6 +888,8 @@ def main():
             criterion,
             DEVICE,
             inv_target_fn=_inv_target,
+            kinematics_loss_module=kinematics_loss_module,
+            kinematics_decode_fn=kinematics_decode_fn,
         )
         val_loss, cc, rmse, r2, val_preds, val_targets = evaluate(
             model,
@@ -805,6 +898,8 @@ def main():
             DEVICE,
             inv_target_fn=_inv_target,
             return_arrays=True,
+            kinematics_loss_module=kinematics_loss_module,
+            kinematics_decode_fn=kinematics_decode_fn,
         )
 
         lag_best = {"lag": 0, "cc": float(cc), "rmse": float(rmse), "r2": float(r2)}

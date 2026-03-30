@@ -41,7 +41,7 @@ from sleeve_preprocessing import (
 )
 from sleeve_TCN_model import SleeveTCNRegressor
 
-DEFAULT_MODEL_DIR = PROJECT_DIR / "outputs_best_v8"
+DEFAULT_MODEL_DIR = PROJECT_DIR / "outputs_v16_best"
 DEFAULT_DATA_DIR = PROJECT_DIR / "data"
 DEFAULT_UDP_HOST = "127.0.0.1"
 DEFAULT_PRED_UDP_PORT = 5020

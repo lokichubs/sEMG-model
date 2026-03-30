@@ -280,6 +280,43 @@ class KinematicLoss(nn.Module):
         return loss
 
 
+class BaselineKinematicsLoss(nn.Module):
+    def __init__(self, n_joints=14, weight=1e-3):
+        super().__init__()
+        self.n_joints = int(n_joints)
+        self.weight = float(weight)
+        self.rules = self._build_rules(self.n_joints)
+
+    @staticmethod
+    def _build_rules(n_joints):
+        if n_joints == 14:
+            return [
+                (2, 1, 0.90, 1.0),
+                (5, 4, 0.90, 1.0),
+                (8, 7, 0.90, 1.0),
+                (11, 10, 0.90, 1.0),
+            ]
+
+        rules = []
+        for idx in range(1, n_joints):
+            rules.append((idx, idx - 1, 1.0, 0.0))
+        return rules
+
+    def forward(self, pred_angles):
+        if self.weight <= 0.0 or len(self.rules) == 0:
+            return pred_angles.new_tensor(0.0)
+
+        penalties = []
+        for distal_idx, proximal_idx, ratio, margin_deg in self.rules:
+            proximal = pred_angles[:, proximal_idx]
+            distal = pred_angles[:, distal_idx]
+            upper_allowed = ratio * proximal + margin_deg
+            violation = torch.relu(distal - upper_allowed)
+            penalties.append((violation**2).mean())
+
+        return self.weight * torch.stack(penalties).mean()
+
+
 if __name__ == "__main__":
     model = SleeveCNNAttentionImproved(window_size=200, n_ch=128, n_joints=14)
     dummy = torch.randn(8, 128, 200)
