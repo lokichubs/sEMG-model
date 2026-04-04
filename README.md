@@ -65,6 +65,8 @@ ninapro/data/
    python train.py
    ```
 
+*Note* : the sleeve model data is not made available as it is still being and going througb various improvements. The Ninapro DB2 dataset is used as a benchmark for model development and will be replaced with our own data once the pipeline is finalized.
+
 ## Preprocessing
 
 - Raw sEMG is filtered and segmented into fixed windows for supervised learning.
@@ -149,3 +151,113 @@ ninapro/data/
 | Loss | `SmoothL1Loss(beta=0.5)` |
 | Checkpoint selection | `r2` |
 | Lag sweep | disabled |
+
+---
+
+## sEMG Sleeve pipeline
+
+The `sEMG_sleeve/` sub-package trains and deploys a live-inference model using our own sEMG sleeve hardware and markerless mocap ground truth. Raw data is recorded with Lab Streaming Layer (LSL) and saved as `.xdf` files.
+
+> **Note:** sleeve data files are not publicly distributed — they live in `sEMG_sleeve/data/` which is gitignored.
+
+### Directory layout
+
+```
+sEMG_sleeve/
+    data/                       # raw .xdf recordings (not tracked)
+    processed data/             # windowed .npz files (not tracked)
+    augmented data/             # rotation-augmented .npz files (not tracked)
+    sleeve_preprocessing.py     # XDF → windowed .npz
+    augment_processed_data.py   # ring-rotation augmentation
+    sleeve_model.py             # SleeveCNNAttentionImproved + loss
+    sleeve_TCN_model.py         # SleeveTCNRegressor (alternative)
+    sleeve_geometry_model.py    # geometry-aware variant
+    sleeve_train.py             # training loop
+    outputs_v16_best/           # current best checkpoint
+    visualization/
+        sEMG_inference.py       # XDF replay → UDP angle stream
+        handtrack_data_handler.py  # UDP relay to Unity
+        Right_Hand_Listener_sEMG.cs  # Unity predicted-hand script
+        Right_Hand_Listener_GT.cs    # Unity ground-truth-hand script
+```
+
+### 1. Preprocess raw XDF recordings
+
+Place `.xdf` files in `sEMG_sleeve/data/`, then run from `sEMG_sleeve/`:
+
+```bash
+cd sEMG_sleeve
+python sleeve_preprocessing.py --db_dir data --output_dir "processed data"
+```
+
+Key options:
+
+| Flag | Default | Description |
+|---|---|---|
+| `--db_dir` | `data` | Folder containing `.xdf` files |
+| `--output_dir` | `processed data` | Output folder for `.npz` files |
+| `--window_len` | `200` | Window length in samples (100 ms @ 2 kHz) |
+| `--step_len` | `50` | Step length in samples (25 ms) |
+| `--train_fraction` | `0.8` | Train/val split fraction |
+| `--emg_stream` | `OpenEphys_EMG` | LSL stream name for EMG |
+| `--angle_stream` | `StereoHandTracker_Angles` | LSL stream name for angles |
+
+### 2. (Optional) Augment training data
+
+Applies ring-rotation augmentation to all `*_train.npz` files and copies val files unchanged:
+
+```bash
+python augment_processed_data.py
+```
+
+Reads from `processed data/`, writes to `augmented data/` by default.
+
+### 3. Train the sleeve model
+
+```bash
+python sleeve_train.py
+```
+
+Checkpoint and training curves are saved to `outputs/` (configurable at the top of `sleeve_train.py`). The current best checkpoint is in `outputs_v16_best/`.
+
+---
+
+### Live inference + Unity visualization
+
+The visualization pipeline replays a raw `.xdf` file through the trained model and streams predicted and ground-truth joint angles to a Unity scene side-by-side.
+
+#### Port map
+
+| Stream | Port |
+|---|---:|
+| Predicted angles (inference → handler) | 5020 |
+| Ground-truth angles (inference → handler) | 5025 |
+| Predicted hand (handler → Unity) | 5016 |
+| Ground-truth hand (handler → Unity) | 5017 |
+
+#### Run order
+
+**1.** Open the Unity scene with the predicted hand (green) and ground-truth hand (red) rigs, each with its UDP listener component attached.
+
+**2.** Start the data handler (from `sEMG_sleeve/visualization/`):
+
+```bash
+cd sEMG_sleeve/visualization
+python handtrack_data_handler.py
+```
+
+**3.** Start inference playback:
+
+```bash
+# Specific subject and session
+python sEMG_inference.py --subject 3 --session 2
+
+# Subject only — picks a random matching session
+python sEMG_inference.py --subject 4
+
+# Explicit XDF file
+python sEMG_inference.py --xdf-file ../data/sub-001_ses-002.xdf
+```
+
+The script loads the model from `outputs_v16_best/` by default. Pass `--model-dir` to override.
+
