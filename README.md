@@ -2,12 +2,68 @@
 
 Temporal sEMG-to-joint-angle regression using a CNN + attention model on Ninapro-style windowed EMG data. Will be adapted for real-time prediction using our own markerless-mocap + sEMG sleeve data pipeline.  
 
+## Installation
+
+```bash
+# Create and activate the environment
+conda create -n semg python=3.11 -y
+conda activate semg
+
+# Install PyTorch — pick the right CUDA build from https://pytorch.org/get-started/locally/
+# Example for CUDA 12.1:
+pip install torch --index-url https://download.pytorch.org/whl/cu121
+
+# All other dependencies:
+pip install -r requirements.txt
+```
+
+## Dataset download — NinaPro DB2 (subjects 1–15)
+
+The model uses the pre-processed NinaPro DB2 dataset. Each subject is a separate zip that extracts to a folder containing `.mat` files.
+
+Run the following from the **repo root** (requires `wget` and `unzip`):
+
+```bash
+mkdir -p ninapro/data
+cd ninapro/data
+
+for i in $(seq 1 15); do
+    wget https://ninapro.hevs.ch/files/DB2_Preproc/DB2_s${i}.zip
+    unzip DB2_s${i}.zip
+    rm DB2_s${i}.zip
+done
+
+cd ../..
+```
+
+After this step `ninapro/data/` should contain 15 folders:
+
+```
+ninapro/data/
+    DB2_s1/
+    DB2_s2/
+    ...
+    DB2_s15/
+```
+
+> **Note:** `ninapro/data/` and `ninapro/processed data/` are listed in `.gitignore` and are not tracked.
+
 ## Quick start
 
-1. Run preprocessing:
-   - `preprocessing.py`
-2. Train the model:
-   - `train.py`
+1. Download dataset (see above).
+2. Run preprocessing from inside the `ninapro/` directory:
+   ```bash
+   cd ninapro
+   python preprocessing.py --db_dir data --output_dir "processed data"
+   ```
+4. Train the basic GRU model:
+   ```bash
+   python train_gru.py
+   ```
+3. Train the CNN-AttentioN Improved model:
+   ```bash
+   python train.py
+   ```
 
 ## Preprocessing
 
