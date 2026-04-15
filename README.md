@@ -226,6 +226,37 @@ Checkpoint and training curves are saved to `outputs/` (configurable at the top 
 
 The visualization pipeline replays a raw `.xdf` file through the trained model and streams predicted and ground-truth joint angles to a Unity scene side-by-side.
 
+### Live LSL inference from Open Ephys
+
+For realtime prediction from the Open Ephys LSL bridge, use the sleeve live-inference app in `sEMG_sleeve/visualization/`.
+
+Run order:
+
+```bash
+# 1. Start Open Ephys GUI with ZMQ Interface enabled
+
+# 2. Start the Open Ephys -> LSL bridge
+cd python-open-ephys/examples/joint_angle_regression
+python open_ephys_lsl_streamer.py --no-gui --emg-stream-name OpenEphys_EMG
+
+# 3. Optional: start hand tracking if you want live ground-truth angles on LSL
+# Expected stream name: StereoHandTracker_Angles
+
+# 4. Start the Unity forwarder / UDP bridge
+cd sEMG-model/sEMG_sleeve/visualization
+python handtrack_data_handler.py
+
+# 5. Start live EMG -> joint-angle inference
+python sEMG_live_lsl_inference.py \
+    --emg-stream OpenEphys_EMG \
+    --pred-lsl-stream PredictedJointAngles
+```
+
+Notes:
+- The default sleeve checkpoint in `outputs_v16_best/` expects `128` EMG channels and `200` model-domain samples per prediction window.
+- The live app reads the incoming LSL sample rate, resamples each live window onto the model window size when needed, and emits predicted angles over UDP port `5020`.
+- For quick validation of the predicted-angle LSL stream, use `Hand-Landmark-Tracker/examples/01_basic_tracking/lsl_jointangles_visualizer.py --stream-name PredictedJointAngles`.
+
 #### Port map
 
 | Stream | Port |
