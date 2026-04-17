@@ -11,6 +11,7 @@ import math
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 
 def build_activation(name):
@@ -26,6 +27,21 @@ def build_activation(name):
     if key in ("leaky_relu", "lrelu"):
         return nn.LeakyReLU(negative_slope=0.01)
     raise ValueError(f"Unsupported activation: {name}")
+
+
+def normalize_pos_embedding(name):
+    key = "sinusoidal" if name is None else str(name).strip().lower()
+    aliases = {
+        "sin": "sinusoidal",
+        "sine": "sinusoidal",
+        "sinusoidal": "sinusoidal",
+        "rope": "rope",
+        "rotary": "rope",
+        "rotary_embedding": "rope",
+    }
+    if key not in aliases:
+        raise ValueError(f"Unsupported positional embedding: {name}")
+    return aliases[key]
 
 
 class CircularElectrodeConv(nn.Module):
@@ -97,14 +113,38 @@ class AttentionBlock(nn.Module):
         dropout=0.15,
         ff_mult=4,
         ff_activation="elu",
+        pos_embedding="sinusoidal",
     ):
         super().__init__()
-        self.attn = nn.MultiheadAttention(
-            embed_dim=d_model,
-            num_heads=n_heads,
-            dropout=dropout,
-            batch_first=True,
-        )
+        self.d_model = int(d_model)
+        self.n_heads = int(n_heads)
+        self.head_dim = self.d_model // self.n_heads
+        self.pos_embedding = normalize_pos_embedding(pos_embedding)
+        self.attn_dropout = float(dropout)
+        if self.pos_embedding == "rope" and self.head_dim % 2 != 0:
+            raise ValueError(
+                f"RoPE requires an even per-head dimension, got {self.head_dim}"
+            )
+
+        if self.pos_embedding == "rope":
+            self.attn = None
+            self.q_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+            self.k_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+            self.v_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+            self.out_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+            self.rotary = RotaryPositionalEmbedding(self.head_dim)
+        else:
+            self.attn = nn.MultiheadAttention(
+                embed_dim=d_model,
+                num_heads=n_heads,
+                dropout=dropout,
+                batch_first=True,
+            )
+            self.q_proj = None
+            self.k_proj = None
+            self.v_proj = None
+            self.out_proj = None
+            self.rotary = None
         self.norm1 = nn.LayerNorm(d_model)
         self.norm2 = nn.LayerNorm(d_model)
         self.drop = nn.Dropout(dropout)
@@ -116,10 +156,58 @@ class AttentionBlock(nn.Module):
         )
 
     def forward(self, x):
-        a, _ = self.attn(x, x, x)
+        if self.pos_embedding == "rope":
+            bsz, seq_len, _ = x.shape
+            q = self.q_proj(x).view(bsz, seq_len, self.n_heads, self.head_dim)
+            k = self.k_proj(x).view(bsz, seq_len, self.n_heads, self.head_dim)
+            v = self.v_proj(x).view(bsz, seq_len, self.n_heads, self.head_dim)
+
+            q = q.transpose(1, 2)
+            k = k.transpose(1, 2)
+            v = v.transpose(1, 2)
+            q, k = self.rotary(q, k)
+            a = F.scaled_dot_product_attention(
+                q,
+                k,
+                v,
+                dropout_p=self.attn_dropout if self.training else 0.0,
+            )
+            a = a.transpose(1, 2).contiguous().view(bsz, seq_len, self.d_model)
+            a = self.out_proj(a)
+        else:
+            a, _ = self.attn(x, x, x)
         x = self.norm1(x + self.drop(a))
         x = self.norm2(x + self.drop(self.ff(x)))
         return x
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    def __init__(self, head_dim, base=10000.0):
+        super().__init__()
+        inv_freq = 1.0 / (
+            base ** (torch.arange(0, head_dim, 2).float() / float(head_dim))
+        )
+        self.register_buffer("inv_freq", inv_freq, persistent=False)
+
+    @staticmethod
+    def _rotate_half(x):
+        x_even = x[..., ::2]
+        x_odd = x[..., 1::2]
+        return torch.stack((-x_odd, x_even), dim=-1).flatten(start_dim=-2)
+
+    def _cos_sin(self, seq_len, device, dtype):
+        positions = torch.arange(seq_len, device=device, dtype=self.inv_freq.dtype)
+        freqs = torch.outer(positions, self.inv_freq)
+        emb = torch.repeat_interleave(freqs, repeats=2, dim=-1)
+        cos = emb.cos().to(dtype=dtype).unsqueeze(0).unsqueeze(0)
+        sin = emb.sin().to(dtype=dtype).unsqueeze(0).unsqueeze(0)
+        return cos, sin
+
+    def forward(self, q, k):
+        cos, sin = self._cos_sin(q.size(-2), q.device, q.dtype)
+        q = (q * cos) + (self._rotate_half(q) * sin)
+        k = (k * cos) + (self._rotate_half(k) * sin)
+        return q, k
 
 
 class PositionalEncoding(nn.Module):
@@ -164,6 +252,7 @@ class SleeveCNNAttentionImproved(nn.Module):
         cnn_activation="elu",
         attn_ff_activation="elu",
         mlp_activation="elu",
+        pos_embedding="sinusoidal",
     ):
         super().__init__()
         if hidden % n_heads != 0:
@@ -181,6 +270,7 @@ class SleeveCNNAttentionImproved(nn.Module):
         self.cnn_activation = str(cnn_activation)
         self.attn_ff_activation = str(attn_ff_activation)
         self.mlp_activation = str(mlp_activation)
+        self.pos_embedding = normalize_pos_embedding(pos_embedding)
 
         if self.use_circ:
             self.circ = CircularElectrodeConv(
@@ -215,7 +305,11 @@ class SleeveCNNAttentionImproved(nn.Module):
             activation=self.cnn_activation,
         )
 
-        self.pos_enc = PositionalEncoding(hidden, dropout=dropout)
+        self.pos_enc = (
+            PositionalEncoding(hidden, dropout=dropout)
+            if self.pos_embedding == "sinusoidal"
+            else None
+        )
         self.attn_layers = nn.ModuleList(
             [
                 AttentionBlock(
@@ -223,6 +317,7 @@ class SleeveCNNAttentionImproved(nn.Module):
                     n_heads=n_heads,
                     dropout=dropout,
                     ff_activation=self.attn_ff_activation,
+                    pos_embedding=self.pos_embedding,
                 )
                 for _ in range(n_attn)
             ]
@@ -254,7 +349,8 @@ class SleeveCNNAttentionImproved(nn.Module):
         x = self.ms2(x)
 
         x = x.permute(0, 2, 1)
-        x = self.pos_enc(x)
+        if self.pos_enc is not None:
+            x = self.pos_enc(x)
         for layer in self.attn_layers:
             x = layer(x)
 

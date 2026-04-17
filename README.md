@@ -216,6 +216,9 @@ Reads from `processed data/`, writes to `augmented data/` by default.
 
 ```bash
 python sleeve_train.py
+
+# Example: baseline with rotary positional embeddings
+python sleeve_train.py --model baseline --pos-embedding RoPE
 ```
 
 Checkpoint and training curves are saved to `outputs/` (configurable at the top of `sleeve_train.py`). The current best checkpoint is in `outputs_v16_best/`.

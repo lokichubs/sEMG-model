@@ -17,7 +17,11 @@ import numpy as np
 import torch
 import torch.nn as nn
 from scipy.stats import pearsonr
-from sleeve_model import BaselineKinematicsLoss, SleeveCNNAttentionImproved
+from sleeve_model import (
+    BaselineKinematicsLoss,
+    SleeveCNNAttentionImproved,
+    normalize_pos_embedding,
+)
 from sleeve_TCN_model import SleeveTCNRegressor
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -74,6 +78,7 @@ MODEL_REGISTRY = {
         "cnn_activation": "elu",
         "attn_ff_activation": "elu",
         "mlp_activation": "elu",
+        "pos_embedding": "sinusoidal",
     },
     "tcn": {
         "cls": SleeveTCNRegressor,
@@ -162,6 +167,16 @@ def parse_args():
         choices=activation_choices,
         default="relu",
         help="Baseline only: activation for the final MLP head.",
+    )
+    parser.add_argument(
+        "--pos-embedding",
+        "--pos_embedding",
+        type=str,
+        default=None,
+        help=(
+            "Baseline only: positional embedding mode for attention. "
+            "Supported: sinusoidal, RoPE"
+        ),
     )
     parser.add_argument(
         "--kinematics-loss",
@@ -604,6 +619,7 @@ def main():
     baseline_cnn_activation = model_spec.get("cnn_activation", "elu")
     baseline_attn_ff_activation = model_spec.get("attn_ff_activation", "elu")
     baseline_mlp_activation = model_spec.get("mlp_activation", "elu")
+    baseline_pos_embedding = model_spec.get("pos_embedding", "sinusoidal")
 
     if model_key == "baseline":
         if args.cnn_activation is not None:
@@ -612,6 +628,8 @@ def main():
             baseline_attn_ff_activation = args.attn_ff_activation
         if args.mlp_activation is not None:
             baseline_mlp_activation = args.mlp_activation
+        if args.pos_embedding is not None:
+            baseline_pos_embedding = normalize_pos_embedding(args.pos_embedding)
 
     use_kinematics_loss = (
         bool(args.kinematics_loss) if model_key == "baseline" else False
@@ -651,6 +669,7 @@ def main():
             f"attn_ff={baseline_attn_ff_activation}, "
             f"mlp={baseline_mlp_activation}"
         )
+        print(f"Positional embedding: {baseline_pos_embedding}")
         print(
             "Kinematics loss: "
             f"enabled={use_kinematics_loss}, weight={kinematics_weight:.2e}"
@@ -751,6 +770,7 @@ def main():
                 "cnn_activation": baseline_cnn_activation,
                 "attn_ff_activation": baseline_attn_ff_activation,
                 "mlp_activation": baseline_mlp_activation,
+                "pos_embedding": baseline_pos_embedding,
             }
             if model_key == "baseline"
             else {}
@@ -817,6 +837,7 @@ def main():
             "cnn_activation": getattr(model, "cnn_activation", ""),
             "attn_ff_activation": getattr(model, "attn_ff_activation", ""),
             "mlp_activation": getattr(model, "mlp_activation", ""),
+            "pos_embedding": getattr(model, "pos_embedding", "sinusoidal"),
             "parameters": model.count_params(),
         },
         "training": {

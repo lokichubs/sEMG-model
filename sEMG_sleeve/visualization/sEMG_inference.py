@@ -282,6 +282,7 @@ def build_model(config: dict[str, Any]) -> torch.nn.Module:
             cnn_activation=str(model_cfg.get("cnn_activation", "elu")),
             attn_ff_activation=str(model_cfg.get("attn_ff_activation", "elu")),
             mlp_activation=str(model_cfg.get("mlp_activation", "elu")),
+            pos_embedding=str(model_cfg.get("pos_embedding", "sinusoidal")),
         )
         return model
 
